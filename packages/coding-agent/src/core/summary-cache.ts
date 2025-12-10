@@ -1,9 +1,8 @@
 /**
- * Summary cache for instant compaction.
- * Pure functions for cache file operations.
+ * Summary cache utilities for instant compaction.
+ * Cache is stored in-memory (in AgentSession), these are validation helpers.
  */
 
-import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
 import type { CompactionEntry, SessionEntry } from "./session-manager.js";
 
 // ============================================================================
@@ -11,68 +10,8 @@ import type { CompactionEntry, SessionEntry } from "./session-manager.js";
 // ============================================================================
 
 export interface SummaryCache {
-	version: 1;
 	firstKeptEntryIndex: number;
-	generatedAt: string;
 	summary: string;
-}
-
-// ============================================================================
-// File Operations
-// ============================================================================
-
-/**
- * Get cache file path for a session file.
- */
-export function getCacheFilePath(sessionFile: string): string {
-	return sessionFile.replace(/\.jsonl$/, ".summary.json");
-}
-
-/**
- * Load cache from file. Returns null if missing or invalid.
- */
-export function loadSummaryCache(sessionFile: string): SummaryCache | null {
-	const cacheFile = getCacheFilePath(sessionFile);
-	if (!existsSync(cacheFile)) return null;
-
-	try {
-		const content = readFileSync(cacheFile, "utf8");
-		const cache = JSON.parse(content) as SummaryCache;
-
-		// Validate
-		if (cache.version !== 1) return null;
-		if (typeof cache.firstKeptEntryIndex !== "number") return null;
-		if (typeof cache.summary !== "string") return null;
-
-		return cache;
-	} catch {
-		return null;
-	}
-}
-
-/**
- * Save cache to file (atomic write via temp file).
- */
-export function saveSummaryCache(sessionFile: string, cache: SummaryCache): void {
-	const cacheFile = getCacheFilePath(sessionFile);
-	const tempFile = cacheFile + ".tmp";
-
-	writeFileSync(tempFile, JSON.stringify(cache, null, 2), "utf8");
-	renameSync(tempFile, cacheFile);
-}
-
-/**
- * Delete cache file if it exists.
- */
-export function deleteSummaryCache(sessionFile: string): void {
-	const cacheFile = getCacheFilePath(sessionFile);
-	if (existsSync(cacheFile)) {
-		try {
-			unlinkSync(cacheFile);
-		} catch {
-			// Ignore errors (file may have been deleted concurrently)
-		}
-	}
 }
 
 // ============================================================================
@@ -100,19 +39,6 @@ export function isCacheValid(cache: SummaryCache, entries: SessionEntry[]): bool
 	}
 
 	return true;
-}
-
-/**
- * Check if cache covers enough to skip LLM summarization.
- *
- * Cache is sufficient if firstKeptEntryIndex matches or is close to
- * what a fresh compaction would calculate.
- */
-export function isCacheSufficient(cache: SummaryCache, currentCutPoint: number): boolean {
-	// Cache is sufficient if it covers at least as much as current cut point
-	// (or within a small margin - a few new messages since cache was generated is OK)
-	const margin = 3; // Allow up to 3 new entries since cache generation
-	return cache.firstKeptEntryIndex >= currentCutPoint - margin;
 }
 
 // ============================================================================

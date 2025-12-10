@@ -481,3 +481,89 @@ async function generateTurnPrefixSummary(
 		.map((c) => c.text)
 		.join("\n");
 }
+
+// ============================================================================
+// Delta compaction (for background summary cache)
+// ============================================================================
+
+/**
+ * Compact using cached summary + delta.
+ * Used when cache exists but doesn't fully cover current cut point.
+ *
+ * @param entries - All session entries
+ * @param cacheSummary - Previously cached summary text
+ * @param cacheCutPoint - The firstKeptEntryIndex from the cache
+ * @param cutResult - Current cut point result (from findCutPoint)
+ * @param model - Model to use for summarization
+ * @param settings - Compaction settings
+ * @param apiKey - API key for LLM
+ * @param signal - Optional abort signal
+ */
+export async function compactDelta(
+	entries: SessionEntry[],
+	cacheSummary: string,
+	cacheCutPoint: number,
+	cutResult: CutPointResult,
+	model: Model<any>,
+	settings: CompactionSettings,
+	apiKey: string,
+	signal?: AbortSignal,
+): Promise<CompactionEntry> {
+	// Get token count before compaction
+	const lastUsage = getLastAssistantUsage(entries);
+	const tokensBefore = lastUsage ? calculateContextTokens(lastUsage) : 0;
+
+	// Extract delta messages (from cache cut point to current history end)
+	const historyEnd = cutResult.isSplitTurn ? cutResult.turnStartIndex : cutResult.firstKeptEntryIndex;
+	const deltaMessages: AppMessage[] = [];
+
+	for (let i = cacheCutPoint; i < historyEnd; i++) {
+		const entry = entries[i];
+		if (entry.type === "message") {
+			deltaMessages.push(entry.message);
+		}
+	}
+
+	// Prepend cached summary as context
+	deltaMessages.unshift({
+		role: "user",
+		content: `Previous context summary:\n${cacheSummary}`,
+		timestamp: Date.now(),
+	});
+
+	// Extract turn prefix messages if splitting a turn
+	const turnPrefixMessages: AppMessage[] = [];
+	if (cutResult.isSplitTurn) {
+		for (let i = cutResult.turnStartIndex; i < cutResult.firstKeptEntryIndex; i++) {
+			const entry = entries[i];
+			if (entry.type === "message") {
+				turnPrefixMessages.push(entry.message);
+			}
+		}
+	}
+
+	// Generate summaries
+	let summary: string;
+	if (cutResult.isSplitTurn && turnPrefixMessages.length > 0) {
+		const [deltaResult, turnPrefixResult] = await Promise.all([
+			deltaMessages.length > 1 // > 1 because we added context message
+				? generateSummary(deltaMessages, model, settings.reserveTokens, apiKey, signal)
+				: Promise.resolve(cacheSummary), // No new delta, just use cache
+			generateTurnPrefixSummary(turnPrefixMessages, model, settings.reserveTokens, apiKey, signal),
+		]);
+		summary = deltaResult + "\n\n---\n\n**Turn Context (split turn):**\n\n" + turnPrefixResult;
+	} else {
+		summary =
+			deltaMessages.length > 1
+				? await generateSummary(deltaMessages, model, settings.reserveTokens, apiKey, signal)
+				: cacheSummary;
+	}
+
+	return {
+		type: "compaction",
+		timestamp: new Date().toISOString(),
+		summary,
+		firstKeptEntryIndex: cutResult.firstKeptEntryIndex,
+		tokensBefore,
+	};
+}

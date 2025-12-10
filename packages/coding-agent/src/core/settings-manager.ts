@@ -143,7 +143,7 @@ export class SettingsManager {
 	}
 
 	getBackgroundSummaryEnabled(): boolean {
-		return this.settings.compaction?.backgroundSummary ?? true;
+		return this.settings.compaction?.backgroundSummary ?? false;
 	}
 
 	setBackgroundSummaryEnabled(enabled: boolean): void {

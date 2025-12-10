@@ -3,7 +3,6 @@ import { randomBytes } from "crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "fs";
 import { join, resolve } from "path";
 import { getAgentDir } from "../config.js";
-import { deleteSummaryCache } from "./summary-cache.js";
 
 function uuidv4(): string {
 	const bytes = randomBytes(16);
@@ -261,12 +260,6 @@ export class SessionManager {
 		this.pendingEntries = [];
 		this.inMemoryEntries = [];
 		this.sessionInitialized = false;
-
-		// Delete summary cache for old session
-		if (this.sessionFile) {
-			deleteSummaryCache(this.sessionFile);
-		}
-
 		this.initNewSession();
 	}
 

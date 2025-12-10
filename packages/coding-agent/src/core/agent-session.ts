@@ -19,11 +19,12 @@ import { isContextOverflow } from "@mariozechner/pi-ai";
 import { getModelsPath } from "../config.js";
 import { type BashResult, executeBash as executeBashCommand } from "./bash-executor.js";
 import {
+	type CompactionSettings,
 	calculateContextTokens,
 	compact,
+	compactDelta,
 	findCutPoint,
 	findLatestCompactionIndex,
-	generateSummary,
 	getLastAssistantUsage,
 	shouldCompact,
 } from "./compaction.js";
@@ -31,18 +32,15 @@ import { exportSessionToHtml } from "./export-html.js";
 import type { BranchEventResult, HookRunner, TurnEndEvent, TurnStartEvent } from "./hooks/index.js";
 import type { BashExecutionMessage } from "./messages.js";
 import { getApiKeyForModel, getAvailableModels } from "./model-config.js";
-import { type CompactionEntry, loadSessionFromEntries, type SessionManager } from "./session-manager.js";
+import {
+	type CompactionEntry,
+	loadSessionFromEntries,
+	type SessionEntry,
+	type SessionManager,
+} from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { expandSlashCommand, type FileSlashCommand } from "./slash-commands.js";
-import {
-	createCompactionFromCache,
-	deleteSummaryCache,
-	isCacheSufficient,
-	isCacheValid,
-	loadSummaryCache,
-	type SummaryCache,
-	saveSummaryCache,
-} from "./summary-cache.js";
+import { createCompactionFromCache, isCacheValid } from "./summary-cache.js";
 
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
@@ -146,6 +144,7 @@ export class AgentSession {
 	// Background summarization state
 	private _backgroundSummaryAbortController: AbortController | null = null;
 	private _backgroundSummaryTimeout: ReturnType<typeof setTimeout> | null = null;
+	private _summaryCache: { summary: string; firstKeptEntryIndex: number } | null = null;
 
 	// Hook system
 	private _hookRunner: HookRunner | null = null;
@@ -216,10 +215,7 @@ export class AgentSession {
 			const msg = this._lastAssistantMessage;
 			this._lastAssistantMessage = null;
 
-			// Handle compaction if needed (existing)
 			await this._handleAgentEndCompaction(msg);
-
-			// Start background summary (NEW)
 			this._maybeStartBackgroundSummary(msg);
 		}
 	};
@@ -472,8 +468,9 @@ export class AgentSession {
 		this._disconnectFromAgent();
 		await this.abort();
 		this.abortBackgroundSummary();
+		this._summaryCache = null;
 		this.agent.reset();
-		this.sessionManager.reset(); // This now also deletes cache
+		this.sessionManager.reset();
 		this._queuedMessages = [];
 		this._reconnectToAgent();
 	}
@@ -667,60 +664,13 @@ export class AgentSession {
 			const entries = this.sessionManager.loadEntries();
 			const settings = this.settingsManager.getCompactionSettings();
 
-			let compactionEntry: CompactionEntry;
-			let usedCache = false;
-
-			// Try cached summary first (only if no custom instructions)
-			if (!customInstructions && this.sessionManager.isEnabled()) {
-				const cache = loadSummaryCache(this.sessionManager.getSessionFile());
-
-				if (cache && isCacheValid(cache, entries)) {
-					// Calculate what current cut point would be
-					const prevCompactionIndex = findLatestCompactionIndex(entries);
-					const cutResult = findCutPoint(
-						entries,
-						prevCompactionIndex + 1,
-						entries.length,
-						settings.keepRecentTokens,
-					);
-
-					if (isCacheSufficient(cache, cutResult.firstKeptEntryIndex)) {
-						// INSTANT: Use cached summary
-						const lastUsage = getLastAssistantUsage(entries);
-						const tokensBefore = lastUsage ? calculateContextTokens(lastUsage) : 0;
-						compactionEntry = createCompactionFromCache(cache, tokensBefore);
-						usedCache = true;
-					} else {
-						// Cache exists but doesn't cover enough - fall back to LLM
-						compactionEntry = await compact(
-							entries,
-							this.model,
-							settings,
-							apiKey,
-							this._compactionAbortController.signal,
-						);
-					}
-				} else {
-					// No cache or invalid - fall back to LLM
-					compactionEntry = await compact(
-						entries,
-						this.model,
-						settings,
-						apiKey,
-						this._compactionAbortController.signal,
-					);
-				}
-			} else {
-				// Custom instructions or no-session mode - always use LLM
-				compactionEntry = await compact(
-					entries,
-					this.model,
-					settings,
-					apiKey,
-					this._compactionAbortController.signal,
-					customInstructions,
-				);
-			}
+			const { entry: compactionEntry, usedCache } = await this._compactWithCache(
+				entries,
+				settings,
+				apiKey,
+				this._compactionAbortController.signal,
+				customInstructions,
+			);
 
 			if (this._compactionAbortController.signal.aborted) {
 				throw new Error("Compaction cancelled");
@@ -728,7 +678,7 @@ export class AgentSession {
 
 			// Save compaction and invalidate cache
 			this.sessionManager.saveCompaction(compactionEntry);
-			deleteSummaryCache(this.sessionManager.getSessionFile());
+			this._summaryCache = null;
 
 			const loaded = loadSessionFromEntries(this.sessionManager.loadEntries());
 			this.agent.replaceMessages(loaded.messages);
@@ -827,55 +777,13 @@ export class AgentSession {
 			}
 
 			const entries = this.sessionManager.loadEntries();
-			let compactionEntry: CompactionEntry;
-			let usedCache = false;
 
-			// Try cached summary first
-			if (this.sessionManager.isEnabled()) {
-				const cache = loadSummaryCache(this.sessionManager.getSessionFile());
-
-				if (cache && isCacheValid(cache, entries)) {
-					const prevCompactionIndex = findLatestCompactionIndex(entries);
-					const cutResult = findCutPoint(
-						entries,
-						prevCompactionIndex + 1,
-						entries.length,
-						settings.keepRecentTokens,
-					);
-
-					if (isCacheSufficient(cache, cutResult.firstKeptEntryIndex)) {
-						// INSTANT: Use cached summary
-						const lastUsage = getLastAssistantUsage(entries);
-						const tokensBefore = lastUsage ? calculateContextTokens(lastUsage) : 0;
-						compactionEntry = createCompactionFromCache(cache, tokensBefore);
-						usedCache = true;
-					} else {
-						compactionEntry = await compact(
-							entries,
-							this.model,
-							settings,
-							apiKey,
-							this._autoCompactionAbortController.signal,
-						);
-					}
-				} else {
-					compactionEntry = await compact(
-						entries,
-						this.model,
-						settings,
-						apiKey,
-						this._autoCompactionAbortController.signal,
-					);
-				}
-			} else {
-				compactionEntry = await compact(
-					entries,
-					this.model,
-					settings,
-					apiKey,
-					this._autoCompactionAbortController.signal,
-				);
-			}
+			const { entry: compactionEntry, usedCache } = await this._compactWithCache(
+				entries,
+				settings,
+				apiKey,
+				this._autoCompactionAbortController.signal,
+			);
 
 			if (this._autoCompactionAbortController.signal.aborted) {
 				this._emit({ type: "auto_compaction_end", result: null, aborted: true, willRetry: false });
@@ -883,7 +791,7 @@ export class AgentSession {
 			}
 
 			this.sessionManager.saveCompaction(compactionEntry);
-			deleteSummaryCache(this.sessionManager.getSessionFile());
+			this._summaryCache = null;
 
 			const loaded = loadSessionFromEntries(this.sessionManager.loadEntries());
 			this.agent.replaceMessages(loaded.messages);
@@ -941,6 +849,96 @@ export class AgentSession {
 	}
 
 	// =========================================================================
+	// Cache-Aware Compaction Helper
+	// =========================================================================
+
+	/**
+	 * Perform compaction with cache awareness.
+	 * Decision tree:
+	 * 1. Cache valid and fully covers → instant (use cache as-is)
+	 * 2. Cache valid and delta ≤ 50% of full → delta compaction
+	 * 3. Cache invalid, missing, or delta > 50% → full compaction
+	 */
+	private async _compactWithCache(
+		entries: SessionEntry[],
+		settings: CompactionSettings,
+		apiKey: string,
+		signal: AbortSignal,
+		customInstructions?: string,
+	): Promise<{ entry: CompactionEntry; usedCache: boolean }> {
+		// Find current cut point
+		const prevCompactionIndex = findLatestCompactionIndex(entries);
+		const boundaryStart = prevCompactionIndex + 1;
+		const cutResult = findCutPoint(entries, boundaryStart, entries.length, settings.keepRecentTokens);
+
+		// Try cache first (only if no custom instructions and session enabled)
+		if (!customInstructions && this.sessionManager.isEnabled() && this._summaryCache) {
+			const cache = this._summaryCache;
+
+			if (isCacheValid(cache, entries)) {
+				// Cache covers current cut point (within small margin)?
+				// Allow cache to be slightly ahead (a few new messages since cache generation).
+				// But if cache is way ahead (user increased keepRecentTokens), fall back to full.
+				const cacheAheadMargin = 5;
+				const cacheIsAhead = cache.firstKeptEntryIndex > cutResult.firstKeptEntryIndex;
+				const cacheNotTooAhead = cache.firstKeptEntryIndex <= cutResult.firstKeptEntryIndex + cacheAheadMargin;
+
+				if (cacheIsAhead && cacheNotTooAhead) {
+					// INSTANT: Cache covers current cut point (slightly ahead is OK)
+					const lastUsage = getLastAssistantUsage(entries);
+					const tokensBefore = lastUsage ? calculateContextTokens(lastUsage) : 0;
+					// Use current cut point, not cache's (to respect keepRecentTokens setting)
+					return {
+						entry: {
+							type: "compaction",
+							timestamp: new Date().toISOString(),
+							summary: cache.summary,
+							firstKeptEntryIndex: cutResult.firstKeptEntryIndex,
+							tokensBefore,
+						},
+						usedCache: true,
+					};
+				}
+
+				if (cache.firstKeptEntryIndex === cutResult.firstKeptEntryIndex) {
+					// INSTANT: Exact match
+					const lastUsage = getLastAssistantUsage(entries);
+					const tokensBefore = lastUsage ? calculateContextTokens(lastUsage) : 0;
+					return {
+						entry: createCompactionFromCache(cache, tokensBefore),
+						usedCache: true,
+					};
+				}
+
+				// Check if delta is worth it (cache must be behind current)
+				if (cache.firstKeptEntryIndex < cutResult.firstKeptEntryIndex) {
+					const deltaSize = cutResult.firstKeptEntryIndex - cache.firstKeptEntryIndex;
+					const fullSize = cutResult.firstKeptEntryIndex - boundaryStart;
+
+					if (fullSize > 0 && deltaSize <= fullSize * 0.5) {
+						// DELTA: Use cache + summarize delta
+						const entry = await compactDelta(
+							entries,
+							cache.summary,
+							cache.firstKeptEntryIndex,
+							cutResult,
+							this.model!,
+							settings,
+							apiKey,
+							signal,
+						);
+						return { entry, usedCache: true };
+					}
+				}
+			}
+		}
+
+		// FULL: Fall back to full summarization
+		const entry = await compact(entries, this.model!, settings, apiKey, signal, customInstructions);
+		return { entry, usedCache: false };
+	}
+
+	// =========================================================================
 	// Background Summarization
 	// =========================================================================
 
@@ -988,6 +986,7 @@ export class AgentSession {
 
 	/**
 	 * Run background summarization.
+	 * Calls compact() from compaction.ts and stores result in memory.
 	 */
 	private async _runBackgroundSummary(): Promise<void> {
 		this._emit({ type: "background_summary_start" });
@@ -1008,100 +1007,35 @@ export class AgentSession {
 			const entries = this.sessionManager.loadEntries();
 			const settings = this.settingsManager.getCompactionSettings();
 
-			// Find previous compaction boundary
+			// Early return if nothing to summarize
 			const prevCompactionIndex = findLatestCompactionIndex(entries);
 			const boundaryStart = prevCompactionIndex + 1;
-			const boundaryEnd = entries.length;
+			const cutResult = findCutPoint(entries, boundaryStart, entries.length, settings.keepRecentTokens);
 
-			// Find cut point
-			const cutResult = findCutPoint(entries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
-
-			// Nothing to summarize if cut point is at boundary start
 			if (cutResult.firstKeptEntryIndex <= boundaryStart) {
 				this._emit({ type: "background_summary_end", success: true });
 				return;
 			}
 
-			// Extract messages to summarize
-			const historyEnd = cutResult.isSplitTurn ? cutResult.turnStartIndex : cutResult.firstKeptEntryIndex;
-			const messagesToSummarize: AppMessage[] = [];
-
-			for (let i = boundaryStart; i < historyEnd; i++) {
-				const entry = entries[i];
-				if (entry.type === "message") {
-					messagesToSummarize.push(entry.message);
-				}
-			}
-
-			// Include previous compaction summary if exists
-			if (prevCompactionIndex >= 0) {
-				const prevCompaction = entries[prevCompactionIndex] as CompactionEntry;
-				messagesToSummarize.unshift({
-					role: "user",
-					content: `Previous session summary:\n${prevCompaction.summary}`,
-					timestamp: Date.now(),
-				});
-			}
-
-			if (messagesToSummarize.length === 0) {
-				this._emit({ type: "background_summary_end", success: true });
-				return;
-			}
-
-			// Extract turn prefix messages if splitting a turn
-			const turnPrefixMessages: AppMessage[] = [];
-			if (cutResult.isSplitTurn && cutResult.turnStartIndex !== -1) {
-				for (let i = cutResult.turnStartIndex; i < cutResult.firstKeptEntryIndex; i++) {
-					const entry = entries[i];
-					if (entry.type === "message") {
-						turnPrefixMessages.push(entry.message);
-					}
-				}
-			}
-
-			// Generate summary (parallel if split turn, like compact() does)
-			let finalSummary: string;
-			if (turnPrefixMessages.length > 0) {
-				const [historySummary, turnPrefixSummary] = await Promise.all([
-					generateSummary(
-						messagesToSummarize,
-						this.model,
-						settings.reserveTokens,
-						apiKey,
-						this._backgroundSummaryAbortController.signal,
-					),
-					generateSummary(
-						turnPrefixMessages,
-						this.model,
-						Math.floor(settings.reserveTokens * 0.5),
-						apiKey,
-						this._backgroundSummaryAbortController.signal,
-					),
-				]);
-				finalSummary = historySummary + "\n\n---\n\n**Turn Context (split turn):**\n\n" + turnPrefixSummary;
-			} else {
-				finalSummary = await generateSummary(
-					messagesToSummarize,
-					this.model,
-					settings.reserveTokens,
-					apiKey,
-					this._backgroundSummaryAbortController.signal,
-				);
-			}
+			// Call compact() from compaction.ts
+			const entry = await compact(
+				entries,
+				this.model,
+				settings,
+				apiKey,
+				this._backgroundSummaryAbortController.signal,
+			);
 
 			if (this._backgroundSummaryAbortController.signal.aborted) {
 				this._emit({ type: "background_summary_end", success: false, error: "Aborted" });
 				return;
 			}
 
-			// Save cache
-			const cache: SummaryCache = {
-				version: 1,
-				firstKeptEntryIndex: cutResult.firstKeptEntryIndex,
-				generatedAt: new Date().toISOString(),
-				summary: finalSummary,
+			// Store in-memory cache
+			this._summaryCache = {
+				firstKeptEntryIndex: entry.firstKeptEntryIndex,
+				summary: entry.summary,
 			};
-			saveSummaryCache(this.sessionManager.getSessionFile(), cache);
 
 			this._emit({ type: "background_summary_end", success: true });
 		} catch (error) {
@@ -1221,6 +1155,7 @@ export class AgentSession {
 		this._disconnectFromAgent();
 		await this.abort();
 		this.abortBackgroundSummary();
+		this._summaryCache = null;
 		this._queuedMessages = [];
 
 		// Set new session
@@ -1270,7 +1205,8 @@ export class AgentSession {
 	 *   - skipped: True if a hook requested to skip conversation restore
 	 */
 	async branch(entryIndex: number): Promise<{ selectedText: string; skipped: boolean }> {
-		this.abortBackgroundSummary(); // Cache is NOT copied - new branch builds its own
+		this.abortBackgroundSummary();
+		this._summaryCache = null; // New branch builds its own cache
 		const previousSessionFile = this.sessionFile;
 		const entries = this.sessionManager.loadEntries();
 		const selectedEntry = entries[entryIndex];
