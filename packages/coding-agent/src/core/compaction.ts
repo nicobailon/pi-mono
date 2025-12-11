@@ -271,16 +271,40 @@ export function findCutPoint(
 // Summarization
 // ============================================================================
 
-const SUMMARIZATION_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+const SUMMARIZATION_PROMPT = `Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
 
-Include:
-- Current progress and key decisions made
-- Important context, constraints, or user preferences
-- Absolute file paths of any relevant files that were read or modified
-- What remains to be done (clear next steps)
-- Any critical data, examples, or references needed to continue
+This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
 
-Be concise, structured, and focused on helping the next LLM seamlessly continue the work.`;
+Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
+
+1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:
+   - The user's explicit requests and intents
+   - Your approach to addressing the user's requests
+   - Key decisions, technical concepts and code patterns
+   - Specific details like file names, full code snippets, function signatures, file edits
+   - Errors that you ran into and how you fixed them
+   - Pay special attention to specific user feedback, especially if the user told you to do something differently
+
+2. Double-check for technical accuracy and completeness, addressing each required element thoroughly.
+
+Your summary should include the following sections:
+
+1. Primary Request and Intent: What the user originally asked for and their underlying goals
+2. Key Technical Concepts: Technologies, frameworks, libraries, and patterns being used
+3. Files and Code Sections: Specific files read, modified, or created with relevant code snippets
+4. Errors and Fixes: Problems encountered and how they were resolved
+5. Problem Solving: Approaches tried, what worked, what didn't
+6. User Messages: Key user inputs and feedback that shaped the work
+7. Pending Tasks: Work that was planned but not yet completed
+8. Current Work: What was being actively worked on when this summary was created
+9. Next Steps: Clear actions to continue the work (if applicable)`;
+
+/**
+ * Strip <analysis> tags from LLM response to save tokens in stored summary.
+ */
+function stripAnalysisTags(response: string): string {
+	return response.replace(/<analysis>[\s\S]*?<\/analysis>\s*/g, "").trim();
+}
 
 /**
  * Generate a summary of the conversation using the LLM.
@@ -318,7 +342,7 @@ export async function generateSummary(
 		.map((c) => c.text)
 		.join("\n");
 
-	return textContent;
+	return stripAnalysisTags(textContent);
 }
 
 // ============================================================================
