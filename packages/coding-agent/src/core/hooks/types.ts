@@ -66,6 +66,22 @@ export interface HookEventContext {
 	cwd: string;
 	/** Path to session file, or null if --no-session */
 	sessionFile: string | null;
+	/**
+	 * Get all session entries (returns a copy).
+	 * Hook can also read sessionFile directly for lower-level access.
+	 */
+	getSessionEntries(): SessionEntry[];
+	/**
+	 * Make an LLM completion using the current model.
+	 * Returns extracted text content from the response.
+	 */
+	complete(
+		messages: AppMessage[],
+		options?: {
+			maxTokens?: number;
+			signal?: AbortSignal;
+		},
+	): Promise<string>;
 }
 
 // ============================================================================
@@ -127,6 +143,11 @@ export interface TurnEndEvent {
 	turnIndex: number;
 	message: AppMessage;
 	toolResults: AppMessage[];
+	contextWindow?: number;
+	compactionSettings?: {
+		keepRecentTokens: number;
+		reserveTokens: number;
+	};
 }
 
 /**
@@ -173,6 +194,38 @@ export interface BranchEvent {
 }
 
 /**
+ * Event data for pre_compaction event.
+ * Fired before compaction starts. Hooks can provide custom summary or skip compaction.
+ */
+export interface PreCompactionEvent {
+	type: "pre_compaction";
+	entries: SessionEntry[];
+	previousSummary: string | null;
+	cutPointIndex: number;
+	historyEndIndex: number;
+	boundaryStart: number;
+	isSplitTurn: boolean;
+	reason: "threshold" | "overflow" | "manual";
+	settings: {
+		keepRecentTokens: number;
+		reserveTokens: number;
+	};
+}
+
+/**
+ * Event data for post_compaction event.
+ * Fired after compaction is saved. Informational only.
+ */
+export interface PostCompactionEvent {
+	type: "post_compaction";
+	summary: string;
+	tokensBefore: number;
+	cutPointIndex: number;
+	reason: "threshold" | "overflow" | "manual";
+	sourceHook: boolean;
+}
+
+/**
  * Union of all hook event types.
  */
 export type HookEvent =
@@ -184,7 +237,9 @@ export type HookEvent =
 	| TurnEndEvent
 	| ToolCallEvent
 	| ToolResultEvent
-	| BranchEvent;
+	| BranchEvent
+	| PreCompactionEvent
+	| PostCompactionEvent;
 
 // ============================================================================
 // Event Results
@@ -221,6 +276,17 @@ export interface BranchEventResult {
 	skipConversationRestore?: boolean;
 }
 
+/**
+ * Return type for pre_compaction event handlers.
+ * Allows hooks to provide custom summary or skip compaction.
+ */
+export interface PreCompactionResult {
+	/** If provided, skip LLM summarization */
+	summary?: string;
+	/** If true, skip compaction entirely (ignored for overflow - see note) */
+	skip?: boolean;
+}
+
 // ============================================================================
 // Hook API
 // ============================================================================
@@ -244,6 +310,8 @@ export interface HookAPI {
 	on(event: "tool_call", handler: HookHandler<ToolCallEvent, ToolCallEventResult | undefined>): void;
 	on(event: "tool_result", handler: HookHandler<ToolResultEvent, ToolResultEventResult | undefined>): void;
 	on(event: "branch", handler: HookHandler<BranchEvent, BranchEventResult | undefined>): void;
+	on(event: "pre_compaction", handler: HookHandler<PreCompactionEvent, PreCompactionResult | undefined>): void;
+	on(event: "post_compaction", handler: HookHandler<PostCompactionEvent>): void;
 
 	/**
 	 * Send a message to the agent.

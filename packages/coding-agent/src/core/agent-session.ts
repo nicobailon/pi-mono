@@ -15,15 +15,22 @@
 
 import type { Agent, AgentEvent, AgentState, AppMessage, Attachment, ThinkingLevel } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, Message, Model, TextContent } from "@mariozechner/pi-ai";
-import { isContextOverflow } from "@mariozechner/pi-ai";
+import { completeSimple, isContextOverflow } from "@mariozechner/pi-ai";
 import { getModelsPath } from "../config.js";
 import { type BashResult, executeBash as executeBashCommand } from "./bash-executor.js";
-import { calculateContextTokens, compact, shouldCompact } from "./compaction.js";
+import {
+	calculateContextTokens,
+	compact,
+	findCutPoint,
+	findLatestCompactionIndex,
+	shouldCompact,
+} from "./compaction.js";
 import { exportSessionToHtml } from "./export-html.js";
 import type { BranchEventResult, HookRunner, TurnEndEvent, TurnStartEvent } from "./hooks/index.js";
 import type { BashExecutionMessage } from "./messages.js";
+import { messageTransformer } from "./messages.js";
 import { getApiKeyForModel, getAvailableModels } from "./model-config.js";
-import { loadSessionFromEntries, type SessionManager } from "./session-manager.js";
+import { type CompactionEntry, loadSessionFromEntries, type SessionManager } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { expandSlashCommand, type FileSlashCommand } from "./slash-commands.js";
 
@@ -139,6 +146,41 @@ export class AgentSession {
 		this._scopedModels = config.scopedModels ?? [];
 		this._fileCommands = config.fileCommands ?? [];
 		this._hookRunner = config.hookRunner ?? null;
+
+		// Set up hook callbacks
+		if (this._hookRunner) {
+			this._hookRunner.setCompleteCallback(async (messages, options) => {
+				if (!this.model) throw new Error("No model");
+				const apiKey = await getApiKeyForModel(this.model);
+				if (!apiKey) throw new Error("No API key");
+
+				// Transform AppMessage[] to LLM-compatible Message[]
+				// This handles bashExecution and other custom message types
+				const transformedMessages = messageTransformer(messages);
+
+				// Use completeSimple (not complete) - it accepts { apiKey, maxTokens, signal }
+				const response = await completeSimple(
+					this.model,
+					{ messages: transformedMessages },
+					{
+						apiKey,
+						maxTokens: options?.maxTokens,
+						signal: options?.signal,
+					},
+				);
+
+				// Extract text from response
+				return response.content
+					.filter((c): c is { type: "text"; text: string } => c.type === "text")
+					.map((c) => c.text)
+					.join("\n");
+			});
+
+			this._hookRunner.setGetSessionEntriesCallback(() => {
+				// Return a copy to prevent mutation
+				return [...this.sessionManager.loadEntries()];
+			});
+		}
 	}
 
 	// =========================================================================
@@ -257,6 +299,8 @@ export class AgentSession {
 				turnIndex: this._turnIndex,
 				message: event.message,
 				toolResults: event.toolResults,
+				contextWindow: this.model?.contextWindow,
+				compactionSettings: this.settingsManager.getCompactionSettings(),
 			};
 			await this._hookRunner.emit(hookEvent);
 			this._turnIndex++;
@@ -658,6 +702,33 @@ export class AgentSession {
 
 			const entries = this.sessionManager.loadEntries();
 			const settings = this.settingsManager.getCompactionSettings();
+
+			// Calculate cut point for the pre_compaction event
+			const prevCompactionIndex = findLatestCompactionIndex(entries);
+			const boundaryStart = prevCompactionIndex + 1;
+			const cutResult = findCutPoint(entries, boundaryStart, entries.length, settings.keepRecentTokens);
+			const historyEnd = cutResult.isSplitTurn ? cutResult.turnStartIndex : cutResult.firstKeptEntryIndex;
+			const previousSummary =
+				prevCompactionIndex >= 0 ? (entries[prevCompactionIndex] as CompactionEntry).summary : null;
+
+			// Emit pre_compaction, get hook result
+			const hookResult = await this._hookRunner?.emitPreCompaction({
+				type: "pre_compaction",
+				entries,
+				previousSummary,
+				cutPointIndex: cutResult.firstKeptEntryIndex,
+				historyEndIndex: historyEnd,
+				boundaryStart,
+				isSplitTurn: cutResult.isSplitTurn,
+				reason: "manual",
+				settings: { keepRecentTokens: settings.keepRecentTokens, reserveTokens: settings.reserveTokens },
+			});
+
+			// For manual compaction, we ignore hookResult.skip entirely - user explicitly requested compaction
+			// Validate hook summary (reject empty strings)
+			const providedSummary = hookResult?.summary?.trim() ? hookResult.summary : undefined;
+
+			// Call compact() with optional providedSummary and pre-calculated cut point
 			const compactionEntry = await compact(
 				entries,
 				this.model,
@@ -665,6 +736,8 @@ export class AgentSession {
 				apiKey,
 				this._compactionAbortController.signal,
 				customInstructions,
+				providedSummary,
+				cutResult,
 			);
 
 			if (this._compactionAbortController.signal.aborted) {
@@ -675,6 +748,16 @@ export class AgentSession {
 			this.sessionManager.saveCompaction(compactionEntry);
 			const loaded = loadSessionFromEntries(this.sessionManager.loadEntries());
 			this.agent.replaceMessages(loaded.messages);
+
+			// Emit post_compaction
+			await this._hookRunner?.emit({
+				type: "post_compaction",
+				summary: compactionEntry.summary,
+				tokensBefore: compactionEntry.tokensBefore,
+				cutPointIndex: compactionEntry.firstKeptEntryIndex,
+				reason: "manual",
+				sourceHook: providedSummary !== undefined,
+			});
 
 			return {
 				tokensBefore: compactionEntry.tokensBefore,
@@ -753,12 +836,50 @@ export class AgentSession {
 			}
 
 			const entries = this.sessionManager.loadEntries();
+
+			// Calculate cut point for the pre_compaction event
+			const prevCompactionIndex = findLatestCompactionIndex(entries);
+			const boundaryStart = prevCompactionIndex + 1;
+			const cutResult = findCutPoint(entries, boundaryStart, entries.length, settings.keepRecentTokens);
+			const historyEnd = cutResult.isSplitTurn ? cutResult.turnStartIndex : cutResult.firstKeptEntryIndex;
+			const previousSummary =
+				prevCompactionIndex >= 0 ? (entries[prevCompactionIndex] as CompactionEntry).summary : null;
+
+			// Emit pre_compaction, get hook result
+			const hookResult = await this._hookRunner?.emitPreCompaction({
+				type: "pre_compaction",
+				entries,
+				previousSummary,
+				cutPointIndex: cutResult.firstKeptEntryIndex,
+				historyEndIndex: historyEnd,
+				boundaryStart,
+				isSplitTurn: cutResult.isSplitTurn,
+				reason,
+				settings: { keepRecentTokens: settings.keepRecentTokens, reserveTokens: settings.reserveTokens },
+			});
+
+			// Handle hook result
+			// IMPORTANT: Don't allow skip for overflow - compaction is mandatory to recover
+			// Without compaction, the session is stuck with context overflow error
+			if (hookResult?.skip && reason !== "overflow") {
+				this._emit({ type: "auto_compaction_end", result: null, aborted: false, willRetry: false });
+				return;
+			}
+			// For overflow, ignore skip - must compact to recover
+
+			// Validate hook summary (reject empty strings)
+			const providedSummary = hookResult?.summary?.trim() ? hookResult.summary : undefined;
+
+			// Call compact() with optional providedSummary and pre-calculated cut point
 			const compactionEntry = await compact(
 				entries,
 				this.model,
 				settings,
 				apiKey,
 				this._autoCompactionAbortController.signal,
+				undefined, // customInstructions
+				providedSummary,
+				cutResult,
 			);
 
 			if (this._autoCompactionAbortController.signal.aborted) {
@@ -769,6 +890,16 @@ export class AgentSession {
 			this.sessionManager.saveCompaction(compactionEntry);
 			const loaded = loadSessionFromEntries(this.sessionManager.loadEntries());
 			this.agent.replaceMessages(loaded.messages);
+
+			// Emit post_compaction
+			await this._hookRunner?.emit({
+				type: "post_compaction",
+				summary: compactionEntry.summary,
+				tokensBefore: compactionEntry.tokensBefore,
+				cutPointIndex: compactionEntry.firstKeptEntryIndex,
+				reason,
+				sourceHook: providedSummary !== undefined,
+			});
 
 			const result: CompactionResult = {
 				tokensBefore: compactionEntry.tokensBefore,

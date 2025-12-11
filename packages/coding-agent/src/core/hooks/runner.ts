@@ -3,6 +3,8 @@
  */
 
 import { spawn } from "node:child_process";
+import type { AppMessage } from "@mariozechner/pi-agent-core";
+import type { SessionEntry } from "../session-manager.js";
 import type { LoadedHook, SendHandler } from "./loader.js";
 import type {
 	BranchEventResult,
@@ -11,6 +13,8 @@ import type {
 	HookEvent,
 	HookEventContext,
 	HookUIContext,
+	PreCompactionEvent,
+	PreCompactionResult,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolResultEventResult,
@@ -20,6 +24,19 @@ import type {
  * Default timeout for hook execution (30 seconds).
  */
 const DEFAULT_TIMEOUT = 30000;
+
+/**
+ * Callback for LLM completion.
+ */
+export type CompleteCallback = (
+	messages: AppMessage[],
+	options?: { maxTokens?: number; signal?: AbortSignal },
+) => Promise<string>;
+
+/**
+ * Callback for getting session entries.
+ */
+export type GetSessionEntriesCallback = () => SessionEntry[];
 
 /**
  * Listener for hook errors.
@@ -87,6 +104,8 @@ export class HookRunner {
 	private sessionFile: string | null;
 	private timeout: number;
 	private errorListeners: Set<HookErrorListener> = new Set();
+	private completeCallback: CompleteCallback | null = null;
+	private getSessionEntriesCallback: GetSessionEntriesCallback | null = null;
 
 	constructor(hooks: LoadedHook[], cwd: string, timeout: number = DEFAULT_TIMEOUT) {
 		this.hooks = hooks;
@@ -140,6 +159,20 @@ export class HookRunner {
 	}
 
 	/**
+	 * Set the complete callback for LLM completions.
+	 */
+	setCompleteCallback(cb: CompleteCallback): void {
+		this.completeCallback = cb;
+	}
+
+	/**
+	 * Set the session entries callback.
+	 */
+	setGetSessionEntriesCallback(cb: GetSessionEntriesCallback): void {
+		this.getSessionEntriesCallback = cb;
+	}
+
+	/**
 	 * Emit an error to all listeners.
 	 */
 	private emitError(error: HookError): void {
@@ -171,6 +204,12 @@ export class HookRunner {
 			hasUI: this.hasUI,
 			cwd: this.cwd,
 			sessionFile: this.sessionFile,
+			complete:
+				this.completeCallback ??
+				(async () => {
+					throw new Error("complete() not available");
+				}),
+			getSessionEntries: this.getSessionEntriesCallback ?? (() => []),
 		};
 	}
 
@@ -243,5 +282,41 @@ export class HookRunner {
 		}
 
 		return result;
+	}
+
+	/**
+	 * Emit a pre_compaction event to all hooks.
+	 * Returns the result if any hook provides one.
+	 */
+	async emitPreCompaction(event: PreCompactionEvent): Promise<PreCompactionResult | undefined> {
+		const ctx = this.createContext();
+
+		for (const hook of this.hooks) {
+			const handlers = hook.handlers.get("pre_compaction");
+			if (!handlers || handlers.length === 0) continue;
+
+			for (const handler of handlers) {
+				try {
+					const timeout = createTimeout(this.timeout);
+					const handlerResult = (await Promise.race([handler(event, ctx), timeout.promise])) as
+						| PreCompactionResult
+						| undefined;
+					timeout.clear();
+
+					if (handlerResult?.summary || handlerResult?.skip) {
+						return handlerResult;
+					}
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					this.emitError({
+						hookPath: hook.path,
+						event: event.type,
+						error: message,
+					});
+				}
+			}
+		}
+
+		return undefined;
 	}
 }

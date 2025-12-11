@@ -271,16 +271,53 @@ export function findCutPoint(
 // Summarization
 // ============================================================================
 
-const SUMMARIZATION_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+export const SUMMARIZATION_PROMPT = `Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
 
-Include:
-- Current progress and key decisions made
-- Important context, constraints, or user preferences
-- Absolute file paths of any relevant files that were read or modified
-- What remains to be done (clear next steps)
-- Any critical data, examples, or references needed to continue
+This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
 
-Be concise, structured, and focused on helping the next LLM seamlessly continue the work.`;
+Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
+
+1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:
+   - The user's explicit requests and intents
+   - Your approach to addressing the user's requests
+   - Key decisions, technical concepts and code patterns
+   - Specific details like file names, full code snippets, function signatures, file edits
+   - Errors that you ran into and how you fixed them
+   - Pay special attention to specific user feedback, especially if the user told you to do something differently
+
+2. Double-check for technical accuracy and completeness, addressing each required element thoroughly.
+
+Your summary should include the following sections:
+
+1. Primary Request and Intent: What the user originally asked for and their underlying goals
+2. Key Technical Concepts: Technologies, frameworks, libraries, and patterns being used
+3. Files and Code Sections: Specific files read, modified, or created with relevant code snippets
+4. Errors and Fixes: Problems encountered and how they were resolved
+5. Problem Solving: Approaches tried, what worked, what didn't
+6. User Messages: Key user inputs and feedback that shaped the work
+7. Pending Tasks: Work that was planned but not yet completed
+8. Current Work: What was being actively worked on when this summary was created
+9. Next Steps: Clear actions to continue the work (if applicable)`;
+
+/**
+ * Strip <analysis> tags from LLM response to save tokens in stored summary.
+ */
+export function stripAnalysisTags(response: string): string {
+	// Remove <analysis>...</analysis> section
+	return response.replace(/<analysis>[\s\S]*?<\/analysis>\s*/g, "").trim();
+}
+
+/**
+ * Find the index of the most recent compaction entry, or -1 if none.
+ */
+export function findLatestCompactionIndex(entries: SessionEntry[]): number {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		if (entries[i].type === "compaction") {
+			return i;
+		}
+	}
+	return -1;
+}
 
 /**
  * Generate a summary of the conversation using the LLM.
@@ -318,7 +355,7 @@ export async function generateSummary(
 		.map((c) => c.text)
 		.join("\n");
 
-	return textContent;
+	return stripAnalysisTags(textContent);
 }
 
 // ============================================================================
@@ -345,6 +382,8 @@ Be concise. Focus on information needed to understand the retained recent work.`
  * @param apiKey - API key for LLM
  * @param signal - Optional abort signal
  * @param customInstructions - Optional custom focus for the summary
+ * @param providedSummary - Optional summary provided by hooks (skips LLM if provided)
+ * @param precomputedCutPoint - Optional pre-calculated cut point (avoids recalculation)
  */
 export async function compact(
 	entries: SessionEntry[],
@@ -353,6 +392,8 @@ export async function compact(
 	apiKey: string,
 	signal?: AbortSignal,
 	customInstructions?: string,
+	providedSummary?: string,
+	precomputedCutPoint?: CutPointResult,
 ): Promise<CompactionEntry> {
 	// Don't compact if the last entry is already a compaction
 	if (entries.length > 0 && entries[entries.length - 1].type === "compaction") {
@@ -360,13 +401,7 @@ export async function compact(
 	}
 
 	// Find previous compaction boundary
-	let prevCompactionIndex = -1;
-	for (let i = entries.length - 1; i >= 0; i--) {
-		if (entries[i].type === "compaction") {
-			prevCompactionIndex = i;
-			break;
-		}
-	}
+	const prevCompactionIndex = findLatestCompactionIndex(entries);
 	const boundaryStart = prevCompactionIndex + 1;
 	const boundaryEnd = entries.length;
 
@@ -374,8 +409,9 @@ export async function compact(
 	const lastUsage = getLastAssistantUsage(entries);
 	const tokensBefore = lastUsage ? calculateContextTokens(lastUsage) : 0;
 
-	// Find cut point (entry index) within the valid range
-	const cutResult = findCutPoint(entries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
+	// Use pre-calculated cut point if provided, otherwise calculate it
+	const cutResult =
+		precomputedCutPoint ?? findCutPoint(entries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
 
 	// Extract messages for history summary (before the turn that contains the cut point)
 	const historyEnd = cutResult.isSplitTurn ? cutResult.turnStartIndex : cutResult.firstKeptEntryIndex;
@@ -408,29 +444,49 @@ export async function compact(
 		}
 	}
 
-	// Generate summaries (can be parallel if both needed) and merge into one
+	// Generate summaries with priority order:
+	// 1. customInstructions - user explicitly requested custom summary via /compact
+	// 2. providedSummary - hook provided cached summary (non-split-turn only)
+	// 3. Split turn - always generate both history + turn prefix (hook can't provide this)
+	// 4. Default - generate history summary
 	let summary: string;
 
-	if (cutResult.isSplitTurn && turnPrefixMessages.length > 0) {
-		// Generate both summaries in parallel
+	if (customInstructions) {
+		// User explicitly requested custom summary - don't use hook's cached version
+		if (cutResult.isSplitTurn && turnPrefixMessages.length > 0) {
+			// Split turn with custom instructions: generate both with custom focus
+			const [historyResult, turnPrefixResult] = await Promise.all([
+				historyMessages.length > 0
+					? generateSummary(historyMessages, model, settings.reserveTokens, apiKey, signal, customInstructions)
+					: Promise.resolve("No prior history."),
+				generateTurnPrefixSummary(turnPrefixMessages, model, settings.reserveTokens, apiKey, signal),
+			]);
+			summary = historyResult + "\n\n---\n\n**Turn Context (split turn):**\n\n" + turnPrefixResult;
+		} else {
+			summary = await generateSummary(
+				historyMessages,
+				model,
+				settings.reserveTokens,
+				apiKey,
+				signal,
+				customInstructions,
+			);
+		}
+	} else if (providedSummary && !cutResult.isSplitTurn) {
+		// Hook provided summary for non-split-turn (no custom instructions)
+		summary = providedSummary;
+	} else if (cutResult.isSplitTurn && turnPrefixMessages.length > 0) {
+		// Split turn without custom instructions: generate both summaries
 		const [historyResult, turnPrefixResult] = await Promise.all([
 			historyMessages.length > 0
-				? generateSummary(historyMessages, model, settings.reserveTokens, apiKey, signal, customInstructions)
+				? generateSummary(historyMessages, model, settings.reserveTokens, apiKey, signal)
 				: Promise.resolve("No prior history."),
 			generateTurnPrefixSummary(turnPrefixMessages, model, settings.reserveTokens, apiKey, signal),
 		]);
-		// Merge into single summary
 		summary = historyResult + "\n\n---\n\n**Turn Context (split turn):**\n\n" + turnPrefixResult;
 	} else {
-		// Just generate history summary
-		summary = await generateSummary(
-			historyMessages,
-			model,
-			settings.reserveTokens,
-			apiKey,
-			signal,
-			customInstructions,
-		);
+		// Default: generate history summary
+		summary = await generateSummary(historyMessages, model, settings.reserveTokens, apiKey, signal);
 	}
 
 	return {

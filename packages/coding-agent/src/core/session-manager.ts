@@ -72,13 +72,15 @@ export interface LoadedSession {
 	model: { provider: string; modelId: string } | null;
 }
 
-export const SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
+export const SUMMARY_PREFIX = `This session is being continued from a previous conversation that ran out of context. The conversation is summarized below:
 
 <summary>
 `;
 
 export const SUMMARY_SUFFIX = `
-</summary>`;
+</summary>
+
+Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.`;
 
 /**
  * Create a user message containing the summary with the standard prefix.
