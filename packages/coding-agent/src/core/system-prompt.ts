@@ -167,8 +167,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions = {}): strin
 			}
 		}
 
-		// Append skills section
-		if (skillsEnabled) {
+		// Append skills section (only if read tool is available)
+		const customPromptHasRead = !selectedTools || selectedTools.includes("read");
+		if (skillsEnabled && customPromptHasRead) {
 			const skills = loadSkills();
 			prompt += buildSkillsSection(skills);
 		}
@@ -273,8 +274,8 @@ Documentation:
 		}
 	}
 
-	// Append skills section
-	if (skillsEnabled) {
+	// Append skills section (only if read tool is available)
+	if (skillsEnabled && hasRead) {
 		const skills = loadSkills();
 		prompt += buildSkillsSection(skills);
 	}

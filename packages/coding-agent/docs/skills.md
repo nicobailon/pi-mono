@@ -61,6 +61,8 @@ Run scripts from: {baseDir}/scripts/
 | `description` | Yes | Short description shown to the agent for skill selection |
 | `name` | No | Override the skill name (defaults to filename or directory name) |
 
+**Note:** The frontmatter parser only supports simple single-line `key: value` syntax. Multiline YAML blocks (e.g., `description: |`) are not supported.
+
 ### Variables
 
 - `{baseDir}` - The directory containing the skill file. Use this to reference bundled scripts or resources.
@@ -68,8 +70,8 @@ Run scripts from: {baseDir}/scripts/
 ### Subdirectories (Pi Skills Only)
 
 Pi skills in subdirectories are named with a colon separator. For example:
-- `skills/db/migrate.md` becomes skill `db:migrate`
-- `skills/aws/s3/upload.md` becomes skill `aws:s3:upload`
+- `~/.pi/agent/skills/db/migrate.md` becomes skill `db:migrate`
+- `.pi/skills/aws/s3/upload.md` becomes skill `aws:s3:upload`
 
 ## Disabling Skills
 
