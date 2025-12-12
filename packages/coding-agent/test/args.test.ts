@@ -133,6 +133,18 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("skills flags", () => {
+		test("parses --no-skills flag", () => {
+			const result = parseArgs(["--no-skills"]);
+			expect(result.noSkills).toBe(true);
+		});
+
+		test("parses --list-skills flag", () => {
+			const result = parseArgs(["--list-skills"]);
+			expect(result.listSkills).toBe(true);
+		});
+	});
+
 	describe("--hook flag", () => {
 		test("parses single --hook", () => {
 			const result = parseArgs(["--hook", "./my-hook.ts"]);

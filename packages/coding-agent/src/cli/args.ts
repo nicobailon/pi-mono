@@ -20,6 +20,7 @@ export interface Args {
 	resume?: boolean;
 	help?: boolean;
 	version?: boolean;
+	listSkills?: boolean;
 	mode?: Mode;
 	noSession?: boolean;
 	session?: string;
@@ -52,6 +53,8 @@ export function parseArgs(args: string[]): Args {
 			result.help = true;
 		} else if (arg === "--version" || arg === "-v") {
 			result.version = true;
+		} else if (arg === "--list-skills") {
+			result.listSkills = true;
 		} else if (arg === "--mode" && i + 1 < args.length) {
 			const mode = args[++i];
 			if (mode === "text" || mode === "json" || mode === "rpc") {
@@ -144,6 +147,7 @@ ${chalk.bold("Options:")}
   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh
   --hook <path>                  Load a hook file (can be used multiple times)
   --no-skills                    Disable skills discovery and loading
+  --list-skills                  List discovered skills and exit
   --export <file>                Export session file to HTML and exit
   --help, -h                     Show this help
   --version, -v                  Show version number

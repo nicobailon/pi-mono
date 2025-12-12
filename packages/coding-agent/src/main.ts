@@ -16,6 +16,7 @@ import { findModel, getApiKeyForModel, getAvailableModels } from "./core/model-c
 import { resolveModelScope, restoreModelFromSession, type ScopedModel } from "./core/model-resolver.js";
 import { SessionManager } from "./core/session-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
+import { loadSkills } from "./core/skills.js";
 import { loadSlashCommands } from "./core/slash-commands.js";
 import { buildSystemPrompt } from "./core/system-prompt.js";
 import { allTools, codingTools } from "./core/tools/index.js";
@@ -146,6 +147,21 @@ export async function main(args: string[]) {
 
 	if (parsed.help) {
 		printHelp();
+		return;
+	}
+
+	if (parsed.listSkills) {
+		const skills = loadSkills();
+		if (skills.length === 0) {
+			console.log("No skills found.");
+		} else {
+			console.log(`Skills (${skills.length} found):\n`);
+			for (const skill of skills) {
+				console.log(`  ${chalk.bold(skill.name)} ${chalk.dim(`[${skill.source}]`)}`);
+				console.log(`    ${skill.description}`);
+				console.log(`    ${chalk.dim(skill.filePath)}\n`);
+			}
+		}
 		return;
 	}
 

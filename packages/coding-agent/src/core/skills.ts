@@ -27,7 +27,7 @@ function stripQuotes(value: string): string {
 	return value;
 }
 
-function parseFrontmatter(content: string): { frontmatter: SkillFrontmatter; body: string } {
+export function parseFrontmatter(content: string): { frontmatter: SkillFrontmatter; body: string } {
 	const frontmatter: SkillFrontmatter = { description: "" };
 
 	const normalizedContent = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");

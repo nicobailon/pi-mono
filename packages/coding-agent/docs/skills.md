@@ -41,9 +41,21 @@ Scripts are in: {baseDir}/scripts/
 
 The parser only supports single-line `key: value` syntax. Multiline YAML blocks are not supported.
 
-### Variables
+### The `{baseDir}` Placeholder
 
-`{baseDir}` is replaced with the directory containing the skill file. Use it to reference bundled scripts or resources.
+Skills can use `{baseDir}` to reference bundled scripts or resources relative to the skill file location. This is a convention - the placeholder is not automatically substituted. Instead, the agent sees the skill's base directory path in the system prompt and mentally substitutes `{baseDir}` when reading the skill content.
+
+This matches Claude Code's behavior, where skills are provided with their base directory as metadata.
+
+Example usage in a skill:
+```markdown
+Run the extraction script:
+python {baseDir}/scripts/extract.py --file input.pdf
+```
+
+When the agent reads this skill, it knows from the system prompt that the base directory is (for example) `/Users/me/.pi/agent/skills/pdf-tools/`, so it substitutes accordingly.
+
+**Note:** `{baseDir}` is the only supported placeholder.
 
 ### Subdirectories (Pi Skills)
 
