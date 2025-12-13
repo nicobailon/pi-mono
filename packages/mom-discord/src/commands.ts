@@ -11,7 +11,7 @@ import {
 	TextInputBuilder,
 	TextInputStyle,
 } from "discord.js";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync } from "fs";
 import { writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import * as log from "./log.js";
@@ -164,7 +164,6 @@ export function readMemory(memoryPath: string): string {
 export async function writeMemory(memoryPath: string, content: string): Promise<void> {
 	// Ensure directory exists
 	const dir = dirname(memoryPath);
-	const { mkdirSync } = await import("fs");
 	if (!existsSync(dir)) {
 		mkdirSync(dir, { recursive: true });
 	}

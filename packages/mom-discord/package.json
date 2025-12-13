@@ -1,6 +1,6 @@
 {
 	"name": "@mariozechner/mom-discord",
-	"version": "0.1.0",
+	"version": "0.12.9",
 	"description": "Discord bot that delegates messages to the pi coding agent",
 	"type": "module",
 	"bin": {

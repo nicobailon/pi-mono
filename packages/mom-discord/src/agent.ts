@@ -2,7 +2,7 @@ import { Agent, type AgentEvent, ProviderTransport } from "@mariozechner/pi-agen
 import { getModel } from "@mariozechner/pi-ai";
 import { existsSync, readFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
-import { join } from "path";
+import { dirname, join } from "path";
 import type { ChannelInfo, DiscordContext, UserInfo } from "./discord.js";
 import * as log from "./log.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
@@ -339,10 +339,10 @@ export function createAgentRunner(sandboxConfig: SandboxConfig): AgentRunner {
 			const channelId = ctx.message.channel;
 			const guildId = ctx.message.guild;
 
-			// Calculate workspace path
-			const workspacePath = guildId
-				? executor.getWorkspacePath(channelDir.replace(`/${guildId}/${channelId}`, ""))
-				: executor.getWorkspacePath(channelDir.replace(`/${channelId}`, ""));
+			// Calculate workspace path (root working directory, not channel directory).
+			// Use path operations (not string replace) to remain cross-platform.
+			const workspaceRootOnHost = guildId ? dirname(dirname(channelDir)) : dirname(channelDir);
+			const workspacePath = executor.getWorkspacePath(workspaceRootOnHost);
 
 			const recentMessages = getRecentMessages(channelDir, 50);
 			const memory = getMemory(channelDir);

@@ -13,5 +13,6 @@ const typeboxHelper = Type.Object({
 	operation: StringEnum(["add", "subtract", "multiply", "divide"]),
 });
 
-console.log("Zod:", JSON.stringify(zodToJsonSchema(zodSchema), null, 2));
+// zod-to-json-schema's type surface can lag behind zod's types; cast for this debug script.
+console.log("Zod:", JSON.stringify(zodToJsonSchema(zodSchema as unknown as z.ZodTypeAny), null, 2));
 console.log("\nTypeBox.StringEnum:", JSON.stringify(typeboxHelper, null, 2));

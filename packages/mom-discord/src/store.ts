@@ -103,13 +103,17 @@ export class ChannelStore {
 	 * Log a message to the channel's log.jsonl
 	 */
 	async logMessage(channelId: string, message: LoggedMessage, guildId?: string): Promise<boolean> {
-		const dedupeKey = `${guildId || "dm"}:${channelId}:${message.ts}`;
-		if (this.recentlyLogged.has(dedupeKey)) {
-			return false;
-		}
+		// De-dupe only incoming Discord messages (same Discord message ID may be processed twice in some cases).
+		// Bot messages frequently "edit" the same Discord message, which would otherwise drop most of the assistant output.
+		if (!message.isBot) {
+			const dedupeKey = `${guildId || "dm"}:${channelId}:${message.ts}`;
+			if (this.recentlyLogged.has(dedupeKey)) {
+				return false;
+			}
 
-		this.recentlyLogged.set(dedupeKey, Date.now());
-		setTimeout(() => this.recentlyLogged.delete(dedupeKey), 60000);
+			this.recentlyLogged.set(dedupeKey, Date.now());
+			setTimeout(() => this.recentlyLogged.delete(dedupeKey), 60000);
+		}
 
 		const logPath = join(this.getChannelDir(channelId, guildId), "log.jsonl");
 

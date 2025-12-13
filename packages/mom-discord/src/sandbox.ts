@@ -41,7 +41,10 @@ export async function validateSandbox(config: SandboxConfig): Promise<void> {
 		}
 	} catch {
 		console.error(`Error: Container '${config.container}' does not exist.`);
-		console.error("Create it with: ./docker.sh create <data-dir>");
+		console.error("Create it with a container that mounts your working directory to /workspace, e.g.:");
+		console.error(
+			`  docker run -d --name ${config.container} -v <working-dir>:/workspace alpine:latest tail -f /dev/null`,
+		);
 		process.exit(1);
 	}
 

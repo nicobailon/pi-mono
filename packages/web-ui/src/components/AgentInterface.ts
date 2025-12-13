@@ -257,6 +257,10 @@ export class AgentInterface extends LitElement {
 						acc.output += usage.output;
 						acc.cacheRead += usage.cacheRead;
 						acc.cacheWrite += usage.cacheWrite;
+						acc.totalTokens +=
+							typeof usage.totalTokens === "number"
+								? usage.totalTokens
+								: usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 						acc.cost.total += usage.cost.total;
 					}
 					return acc;
@@ -266,6 +270,7 @@ export class AgentInterface extends LitElement {
 					output: 0,
 					cacheRead: 0,
 					cacheWrite: 0,
+					totalTokens: 0,
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				} satisfies Usage,
 			);

@@ -126,15 +126,16 @@ const saveSession = async () => {
 			createdAt: sessionData.createdAt,
 			lastModified: sessionData.lastModified,
 			messageCount: state.messages.length,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				cost: {
+				usage: {
 					input: 0,
 					output: 0,
 					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
 					cacheWrite: 0,
 					total: 0,
 				},

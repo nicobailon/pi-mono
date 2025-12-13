@@ -15,6 +15,7 @@ import * as log from "./log.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
 
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const ANTHROPIC_OAUTH_TOKEN = process.env.ANTHROPIC_OAUTH_TOKEN;
 
@@ -327,9 +328,9 @@ bot.getClient().once("ready", async () => {
 	const clientId = bot.getClient().user?.id;
 	if (clientId) {
 		try {
-			// Register commands globally (for production)
-			// Use guildId param for faster development testing
-			await registerCommands(clientId, DISCORD_BOT_TOKEN);
+			// Register commands globally (production) OR to a specific guild for faster dev iteration.
+			// Global registration can take up to an hour to propagate.
+			await registerCommands(clientId, DISCORD_BOT_TOKEN, DISCORD_GUILD_ID);
 			log.logInfo("Slash commands registered");
 		} catch (error) {
 			log.logWarning("Failed to register slash commands", String(error));

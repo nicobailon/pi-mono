@@ -1,4 +1,4 @@
-import type { Model } from "@mariozechner/pi-ai";
+import type { Model, Usage } from "@mariozechner/pi-ai";
 import type { ThinkingLevel } from "../agent/agent.js";
 import type { AppMessage } from "../components/Messages.js";
 
@@ -109,24 +109,7 @@ export interface SessionMetadata {
 	messageCount: number;
 
 	/** Cumulative usage statistics */
-	usage: {
-		/** Total input tokens */
-		input: number;
-		/** Total output tokens */
-		output: number;
-		/** Total cache read tokens */
-		cacheRead: number;
-		/** Total cache write tokens */
-		cacheWrite: number;
-		/** Total cost breakdown */
-		cost: {
-			input: number;
-			output: number;
-			cacheRead: number;
-			cacheWrite: number;
-			total: number;
-		};
-	};
+	usage: Usage;
 
 	/** Last used thinking level */
 	thinkingLevel: ThinkingLevel;

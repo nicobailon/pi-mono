@@ -59,6 +59,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 				output: 0,
 				cacheRead: 0,
 				cacheWrite: 0,
+				totalTokens: 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "stop",
@@ -157,7 +158,11 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 				else if (event.type === "response.content_part.added") {
 					if (currentItem && currentItem.type === "message") {
 						currentItem.content = currentItem.content || [];
-						currentItem.content.push(event.part);
+						// OpenAI can emit non-text parts here (e.g. reasoning_text). We only track message text/refusals
+						// because reasoning is handled via reasoning events and shouldn't appear in output text blocks.
+						if (event.part.type === "output_text" || event.part.type === "refusal") {
+							currentItem.content.push(event.part);
+						}
 					}
 				} else if (event.type === "response.output_text.delta") {
 					if (currentItem && currentItem.type === "message" && currentBlock && currentBlock.type === "text") {
@@ -254,14 +259,17 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 					const response = event.response;
 					if (response?.usage) {
 						const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
-						output.usage = {
+						const usage = {
 							// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input
 							input: (response.usage.input_tokens || 0) - cachedTokens,
 							output: response.usage.output_tokens || 0,
 							cacheRead: cachedTokens,
 							cacheWrite: 0,
+							totalTokens: 0,
 							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 						};
+						usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+						output.usage = usage;
 					}
 					calculateCost(model, output.usage);
 					// Map status to stop reason

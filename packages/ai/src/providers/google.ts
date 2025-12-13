@@ -56,6 +56,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai"> = (
 				output: 0,
 				cacheRead: 0,
 				cacheWrite: 0,
+				totalTokens: 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "stop",
@@ -194,12 +195,13 @@ export const streamGoogle: StreamFunction<"google-generative-ai"> = (
 				}
 
 				if (chunk.usageMetadata) {
-					output.usage = {
+					const usage = {
 						input: chunk.usageMetadata.promptTokenCount || 0,
 						output:
 							(chunk.usageMetadata.candidatesTokenCount || 0) + (chunk.usageMetadata.thoughtsTokenCount || 0),
 						cacheRead: chunk.usageMetadata.cachedContentTokenCount || 0,
 						cacheWrite: 0,
+						totalTokens: 0,
 						cost: {
 							input: 0,
 							output: 0,
@@ -208,6 +210,8 @@ export const streamGoogle: StreamFunction<"google-generative-ai"> = (
 							total: 0,
 						},
 					};
+					usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+					output.usage = usage;
 					calculateCost(model, output.usage);
 				}
 			}

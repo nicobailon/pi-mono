@@ -45,6 +45,8 @@ npm install @mariozechner/mom-discord
 
 ```bash
 export DISCORD_BOT_TOKEN=your_bot_token_here
+# Optional (recommended for development): register slash commands to a single guild for instant propagation
+export DISCORD_GUILD_ID=your_guild_id_here
 export ANTHROPIC_API_KEY=your_anthropic_key_here
 # OR
 export ANTHROPIC_OAUTH_TOKEN=your_oauth_token_here
