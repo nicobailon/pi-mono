@@ -101,6 +101,19 @@ Optional scope (only if you want per-message username/icon overrides):
 
 ---
 
+## Startup Behavior
+
+On startup, mom:
+1. Connects to Slack via WebSocket (Socket Mode)
+2. Loads channel and user metadata
+3. Backfills missed messages from channels it has previously interacted with
+
+This requires the history scopes (`channels:history`, `groups:history`, `im:history`, `mpim:history`) already included in step 2.
+
+See [How Mom Works](./how-mom-works.md) for details on backfill, logging, and context management.
+
+---
+
 ## 6. Store Tokens
 
 Create `.env` file:

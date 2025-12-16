@@ -11,15 +11,16 @@ import {
 	GatewayIntentBits,
 	type Guild,
 	type Message,
+	MessageType,
 	Partials,
 	type PartialTextBasedChannelFields,
 	ThreadAutoArchiveDuration,
 	type ThreadChannel,
 } from "discord.js";
-import { readFileSync, statSync } from "fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import { request as httpRequest } from "http";
 import { request as httpsRequest } from "https";
-import { basename, resolve } from "path";
+import { basename, join, resolve } from "path";
 import type {
 	DiscordProfileActivityType,
 	DiscordProfileSettings,
@@ -127,6 +128,8 @@ export class MomDiscordBot {
 			}
 			log.logInfo(`Discord: loaded ${this.channelCache.size} channels, ${this.userCache.size} users`);
 
+			await this.backfillAllChannels();
+
 			if (this.settingsManager) {
 				const profile = this.settingsManager.getDiscordProfileSettings();
 				if (Object.keys(profile).length > 0) {
@@ -225,6 +228,241 @@ export class MomDiscordBot {
 				}
 			}
 		});
+	}
+
+	// ==========================================================================
+	// Private - Backfill
+	// ==========================================================================
+
+	private getLogPath(channelId: string, guildId?: string): string {
+		return guildId
+			? join(this.workingDir, "discord", guildId, channelId, "log.jsonl")
+			: join(this.workingDir, "discord", "dm", channelId, "log.jsonl");
+	}
+
+	private compareSnowflakes(a: string, b: string): number {
+		try {
+			const aa = BigInt(a);
+			const bb = BigInt(b);
+			if (aa < bb) return -1;
+			if (aa > bb) return 1;
+			return 0;
+		} catch {
+			return a.localeCompare(b);
+		}
+	}
+
+	private isSnowflakeId(id: string): boolean {
+		return /^[0-9]{16,22}$/.test(id);
+	}
+
+	private stripMentions(text: string): string {
+		return text
+			.replace(/<@!?\d+>/g, "")
+			.replace(/[ \t]{2,}/g, " ")
+			.replace(/[ \t]+\n/g, "\n")
+			.replace(/\n[ \t]+/g, "\n")
+			.trim();
+	}
+
+	private getExistingTimestamps(channelId: string, guildId?: string): Set<string> {
+		const logPath = this.getLogPath(channelId, guildId);
+		const timestamps = new Set<string>();
+		if (!existsSync(logPath)) return timestamps;
+
+		const content = readFileSync(logPath, "utf-8");
+		const lines = content.trim().split("\n").filter(Boolean);
+		for (const line of lines) {
+			try {
+				const entry = JSON.parse(line) as { ts?: string };
+				if (entry.ts) timestamps.add(entry.ts);
+			} catch {
+				// ignore malformed line
+			}
+		}
+		return timestamps;
+	}
+
+	private getBackfillTargetsFromDisk(): Array<{ channelId: string; guildId?: string; label: string }> {
+		const discordDir = join(this.workingDir, "discord");
+		if (!existsSync(discordDir)) return [];
+
+		const targets: Array<{ channelId: string; guildId?: string; label: string }> = [];
+
+		const rootEntries = readdirSync(discordDir, { withFileTypes: true });
+		for (const entry of rootEntries) {
+			if (!entry.isDirectory()) continue;
+
+			if (entry.name === "dm") {
+				const dmEntries = readdirSync(join(discordDir, entry.name), { withFileTypes: true });
+				for (const dmChannelDir of dmEntries) {
+					if (!dmChannelDir.isDirectory()) continue;
+					const channelId = dmChannelDir.name;
+					if (!this.isSnowflakeId(channelId)) continue;
+					const logPath = join(discordDir, "dm", channelId, "log.jsonl");
+					if (!existsSync(logPath)) continue;
+					targets.push({ channelId, label: `dm-${channelId}` });
+				}
+				continue;
+			}
+
+			const guildId = entry.name;
+			if (!this.isSnowflakeId(guildId)) continue;
+			const guildDir = join(discordDir, guildId);
+			const channelEntries = readdirSync(guildDir, { withFileTypes: true });
+			for (const channelDir of channelEntries) {
+				if (!channelDir.isDirectory()) continue;
+				const channelId = channelDir.name;
+				if (!this.isSnowflakeId(channelId)) continue;
+				const logPath = join(guildDir, channelId, "log.jsonl");
+				if (!existsSync(logPath)) continue;
+				const channelName = this.channelCache.get(channelId);
+				targets.push({ channelId, guildId, label: channelName || channelId });
+			}
+		}
+
+		return targets;
+	}
+
+	private async backfillChannel(channelId: string, guildId?: string): Promise<number> {
+		const existingTs = this.getExistingTimestamps(channelId, guildId);
+
+		let latestTs: string | undefined;
+		for (const ts of existingTs) {
+			if (!latestTs || this.compareSnowflakes(ts, latestTs) > 0) {
+				latestTs = ts;
+			}
+		}
+		if (!latestTs) return 0;
+
+		const channel = await this.client.channels.fetch(channelId).catch(() => null);
+		if (!channel) return 0;
+		if (!channel.isTextBased()) return 0;
+
+		const allMessages: Message[] = [];
+
+		let after = latestTs;
+		let pageCount = 0;
+		const maxPages = 3;
+
+		while (pageCount < maxPages) {
+			const fetched = await channel.messages.fetch({ after, limit: 100 });
+			if (fetched.size === 0) break;
+
+			const batch = Array.from(fetched.values());
+			allMessages.push(...batch);
+
+			let maxId: string | undefined;
+			for (const msg of batch) {
+				if (!maxId || this.compareSnowflakes(msg.id, maxId) > 0) {
+					maxId = msg.id;
+				}
+			}
+
+			if (!maxId || maxId === after) break;
+			after = maxId;
+			pageCount++;
+		}
+
+		const seen = new Set<string>();
+		const relevantMessages = allMessages.filter((msg) => {
+			if (seen.has(msg.id)) return false;
+			seen.add(msg.id);
+
+			if (msg.system) return false;
+			if (msg.type !== MessageType.Default && msg.type !== MessageType.Reply) return false;
+			if (existingTs.has(msg.id)) return false;
+
+			if (!msg.author) return false;
+			const isMomMessage = msg.author.id === this.botUserId && msg.author.bot;
+			if (msg.author?.bot && !isMomMessage) return false;
+			if (!msg.content && msg.attachments.size === 0) return false;
+
+			return true;
+		});
+
+		relevantMessages.sort((a, b) => this.compareSnowflakes(a.id, b.id));
+
+		for (const msg of relevantMessages) {
+			const isMomMessage = msg.author.id === this.botUserId;
+			const text = this.stripMentions(msg.content || "");
+
+			const attachments =
+				msg.attachments.size > 0
+					? this.store.processAttachments(
+							channelId,
+							Array.from(msg.attachments.values()).flatMap((a) =>
+								a.name && a.url ? [{ name: a.name, url: a.url }] : [],
+							),
+							msg.id,
+							guildId,
+						)
+					: [];
+
+			if (isMomMessage) {
+				await this.store.logMessage(
+					channelId,
+					{
+						date: msg.createdAt.toISOString(),
+						ts: msg.id,
+						user: "bot",
+						text,
+						attachments,
+						isBot: true,
+					},
+					guildId,
+				);
+			} else {
+				const { userName, displayName } = await this.getUserInfo(msg.author.id, msg.guild || undefined);
+				await this.store.logMessage(
+					channelId,
+					{
+						date: msg.createdAt.toISOString(),
+						ts: msg.id,
+						user: msg.author.id,
+						userName,
+						displayName,
+						text,
+						attachments,
+						isBot: false,
+					},
+					guildId,
+				);
+			}
+
+			existingTs.add(msg.id);
+		}
+
+		return relevantMessages.length;
+	}
+
+	private async backfillAllChannels(): Promise<void> {
+		if (!this.botUserId) {
+			log.logWarning("Discord backfill skipped", "bot user id not available");
+			return;
+		}
+
+		const startTime = Date.now();
+
+		const targets = this.getBackfillTargetsFromDisk();
+		log.logBackfillStart(targets.length);
+
+		let totalMessages = 0;
+		for (const target of targets) {
+			try {
+				const count = await this.backfillChannel(target.channelId, target.guildId);
+				if (count > 0) log.logBackfillChannel(target.label, count);
+				totalMessages += count;
+			} catch (error) {
+				log.logWarning(
+					`Failed to backfill ${target.guildId ? `${target.guildId}/${target.channelId}` : `dm/${target.channelId}`}`,
+					String(error),
+				);
+			}
+		}
+
+		const durationMs = Date.now() - startTime;
+		log.logBackfillComplete(totalMessages, durationMs);
 	}
 
 	private async fetchGuildData(guild: Guild): Promise<void> {

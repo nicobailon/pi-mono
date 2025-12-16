@@ -77,6 +77,19 @@ In Discord:
 
 ---
 
+## Startup Behavior
+
+On startup, mom:
+1. Connects to Discord and loads channel/user metadata
+2. Backfills missed messages from channels it has previously interacted with
+3. Applies any configured profile settings
+
+This requires the **Read Message History** permission (already included in step 4).
+
+See [How Mom Works](./how-mom-works.md) for details on backfill, logging, and context management.
+
+---
+
 ## Environment Variables
 
 | Variable | Required | Description |
