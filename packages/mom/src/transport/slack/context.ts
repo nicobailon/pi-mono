@@ -1,5 +1,5 @@
-import type { SlackBot, SlackEvent } from "../../slack.js";
 import type { TransportContext } from "../types.js";
+import type { SlackBot, SlackEvent } from "./bot.js";
 
 export interface CreateSlackContextArgs {
 	workingDir: string;

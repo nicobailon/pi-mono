@@ -8,7 +8,6 @@ import { downloadChannel } from "./download.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
-import { type MomHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent } from "./slack.js";
 import { ChannelStore } from "./store.js";
 import type { ProfileRuntime } from "./tools/profile.js";
 import {
@@ -20,6 +19,7 @@ import {
 	setupCommandHandlers,
 	writeMemory,
 } from "./transport/discord/index.js";
+import { type MomHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent } from "./transport/slack/bot.js";
 import { createSlackContext } from "./transport/slack/index.js";
 import type { TransportContext } from "./transport/types.js";
 

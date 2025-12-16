@@ -594,15 +594,12 @@ export class MomDiscordBot {
 			if (!responseMessage.channel || responseMessage.channel.type === ChannelType.DM) return null;
 			try {
 				toolThread = await responseMessage.startThread({
-					name: "Tool Results",
+					name: "Details",
 					autoArchiveDuration: ThreadAutoArchiveDuration.OneHour,
 				});
 				return toolThread;
 			} catch (err) {
-				log.logWarning(
-					"Failed to create thread for tool results",
-					err instanceof Error ? err.message : String(err),
-				);
+				log.logWarning("Failed to create thread for details", err instanceof Error ? err.message : String(err));
 				return null;
 			}
 		};
@@ -652,9 +649,15 @@ export class MomDiscordBot {
 
 		const sendSecondary = async (content: string): Promise<void> => {
 			const parts = this.splitMessage(content, DISCORD_SECONDARY_MAX_CHARS);
+			const thread = await getOrCreateThread();
 			for (const part of parts) {
-				const msg = await params.postText(part);
-				secondaryMessages.push(msg);
+				if (thread) {
+					const msg = await thread.send(part);
+					secondaryMessages.push(msg);
+				} else {
+					const msg = await params.postText(part);
+					secondaryMessages.push(msg);
+				}
 			}
 		};
 
