@@ -83,6 +83,10 @@ export interface TransportContext {
 		detailsMaxChars: number;
 	};
 
+	// Slack threads are replies TO the response message, so duplicating keeps main channel clean.
+	// Discord threads include the parent message, so duplicating would show text twice.
+	duplicateResponseToDetails: boolean;
+
 	// Messaging API
 	send(target: ReplyTarget, text: string, opts?: { log?: boolean }): Promise<void>;
 	replaceResponse(text: string): Promise<void>;

@@ -782,10 +782,7 @@ function createRunner(
 				if (text.trim()) {
 					log.logResponse(logCtx, text);
 					queue.enqueueMessage(text, "response", "text output");
-					// Slack threads are replies TO a message, so we duplicate response text there for a clean
-					// main channel. Discord threads include the parent message as the thread starter, so
-					// duplicating would show the same text twice. Discord details thread is for tool results only.
-					if (ctx.transport === "slack") {
+					if (ctx.duplicateResponseToDetails) {
 						queue.enqueueMessage(text, "details", "response details", false);
 					}
 				}

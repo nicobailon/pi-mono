@@ -108,6 +108,7 @@ export function createSlackContext({
 			responseMaxChars: primaryMaxChars,
 			detailsMaxChars,
 		},
+		duplicateResponseToDetails: true,
 		send: async (target, text, opts) => {
 			const shouldLog = opts?.log ?? true;
 			updatePromise = updatePromise.then(async () => {

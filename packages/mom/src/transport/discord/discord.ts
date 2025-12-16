@@ -810,6 +810,7 @@ export class MomDiscordBot {
 			users: this.getUsers(),
 			formatting,
 			limits: { responseMaxChars: DISCORD_PRIMARY_MAX_CHARS, detailsMaxChars: DISCORD_SECONDARY_MAX_CHARS },
+			duplicateResponseToDetails: false,
 
 			send: async (target, content, opts) => {
 				const shouldLog = opts?.log ?? true;
