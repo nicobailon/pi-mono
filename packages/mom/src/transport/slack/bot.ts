@@ -14,6 +14,7 @@ export interface SlackEvent {
 	text: string;
 	files?: Array<{ name?: string; url_private_download?: string; url_private?: string }>;
 	attachments?: Attachment[];
+	reactions?: Array<{ emoji: string; count: number }>;
 }
 
 export interface SlackUser {
@@ -263,6 +264,26 @@ export class SlackBot {
 		});
 	}
 
+	async addReaction(channel: string, timestamp: string, name: string): Promise<{ success: boolean; message: string }> {
+		try {
+			await this.webClient.reactions.add({ channel, timestamp, name });
+			return { success: true, message: `Reacted with :${name}:` };
+		} catch (err) {
+			return { success: false, message: err instanceof Error ? err.message : String(err) };
+		}
+	}
+
+	async fetchMessageReactions(channel: string, timestamp: string): Promise<Array<{ emoji: string; count: number }>> {
+		try {
+			const result = await this.webClient.reactions.get({ channel, timestamp });
+			const message = result.message as { reactions?: Array<{ name: string; count: number }> } | undefined;
+			if (!message?.reactions) return [];
+			return message.reactions.map((r) => ({ emoji: `:${r.name}:`, count: r.count }));
+		} catch {
+			return [];
+		}
+	}
+
 	logToFile(channel: string, entry: object): void {
 		const dir = join(this.workingDir, channel);
 		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -310,7 +331,10 @@ export class SlackBot {
 	}
 
 	private setupEventHandlers(): void {
-		this.socketClient.on("app_mention", ({ event, ack }) => {
+		this.socketClient.on("app_mention", async ({ event, ack }) => {
+			// Ack early to avoid Slack retries due to slow downstream calls (e.g., reactions.get).
+			void ack();
+
 			const e = event as {
 				text: string;
 				channel: string;
@@ -320,7 +344,6 @@ export class SlackBot {
 			};
 
 			if (e.channel.startsWith("D")) {
-				ack();
 				return;
 			}
 
@@ -334,12 +357,12 @@ export class SlackBot {
 			};
 
 			slackEvent.attachments = this.logUserMessage(slackEvent);
+			slackEvent.reactions = await this.fetchMessageReactions(e.channel, e.ts);
 
 			if (this.startupTs && e.ts < this.startupTs) {
 				log.logInfo(
 					`[${e.channel}] Logged old message (pre-startup), not triggering: ${slackEvent.text.substring(0, 30)}`,
 				);
-				ack();
 				return;
 			}
 
@@ -349,7 +372,6 @@ export class SlackBot {
 				} else {
 					this.postMessage(e.channel, "_Nothing running_");
 				}
-				ack();
 				return;
 			}
 
@@ -358,11 +380,12 @@ export class SlackBot {
 			} else {
 				this.getQueue(e.channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
 			}
-
-			ack();
 		});
 
-		this.socketClient.on("message", ({ event, ack }) => {
+		this.socketClient.on("message", async ({ event, ack }) => {
+			// Ack early to avoid Slack retries due to slow downstream calls (e.g., reactions.get).
+			void ack();
+
 			const e = event as {
 				text?: string;
 				channel: string;
@@ -375,15 +398,12 @@ export class SlackBot {
 			};
 
 			if (e.bot_id || !e.user || e.user === this.botUserId) {
-				ack();
 				return;
 			}
 			if (e.subtype !== undefined && e.subtype !== "file_share") {
-				ack();
 				return;
 			}
 			if (!e.text && (!e.files || e.files.length === 0)) {
-				ack();
 				return;
 			}
 
@@ -391,7 +411,6 @@ export class SlackBot {
 			const isBotMention = e.text?.includes(`<@${this.botUserId}>`);
 
 			if (!isDM && isBotMention) {
-				ack();
 				return;
 			}
 
@@ -405,16 +424,15 @@ export class SlackBot {
 			};
 
 			slackEvent.attachments = this.logUserMessage(slackEvent);
+			slackEvent.reactions = await this.fetchMessageReactions(e.channel, e.ts);
 
 			if (this.startupTs && e.ts < this.startupTs) {
 				log.logInfo(`[${e.channel}] Skipping old message (pre-startup): ${slackEvent.text.substring(0, 30)}`);
-				ack();
 				return;
 			}
 
 			if (isDM) {
 				if (!this.settingsManager?.canUserDM(e.user)) {
-					ack();
 					return;
 				}
 
@@ -424,7 +442,6 @@ export class SlackBot {
 					} else {
 						this.postMessage(e.channel, "_Nothing running_");
 					}
-					ack();
 					return;
 				}
 
@@ -434,8 +451,6 @@ export class SlackBot {
 					this.getQueue(e.channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
 				}
 			}
-
-			ack();
 		});
 	}
 

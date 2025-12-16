@@ -89,6 +89,7 @@ export function createSlackContext({
 			channelId: event.channel,
 			messageId: event.ts,
 			attachments: (event.attachments || []).map((a) => ({ local: a.local })),
+			reactions: event.reactions,
 		},
 		channelName: slack.getChannel(event.channel)?.name,
 		channels: slack.getAllChannels().map((c) => ({ id: c.id, name: c.name })),

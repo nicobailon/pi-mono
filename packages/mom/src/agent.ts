@@ -17,6 +17,7 @@ import { formatUsageSummaryText } from "./log.js";
 import { createExecutor, type SandboxConfig } from "./sandbox.js";
 import { createMomTools } from "./tools/index.js";
 import type { ProfileRuntime } from "./tools/profile.js";
+import type { ReactRuntime } from "./tools/react.js";
 import type {
 	ChannelInfo,
 	FormatterOutput,
@@ -484,13 +485,22 @@ export function getOrCreateRunner(
 	channelId: string,
 	channelDir: string,
 	getProfileRuntime?: () => ProfileRuntime | null,
+	getReactRuntime?: () => ReactRuntime | null,
 ): AgentRunner {
 	const runnerKey = `slack:${channelId}`;
 	const existing = channelRunners.get(runnerKey);
 	if (existing) return existing;
 
 	const workingDir = resolve(channelDir, "..");
-	const runner = createRunner(sandboxConfig, "slack", runnerKey, channelDir, workingDir, getProfileRuntime);
+	const runner = createRunner(
+		sandboxConfig,
+		"slack",
+		runnerKey,
+		channelDir,
+		workingDir,
+		getProfileRuntime,
+		getReactRuntime,
+	);
 	channelRunners.set(runnerKey, runner);
 	return runner;
 }
@@ -502,10 +512,19 @@ export function getOrCreateRunnerForTransport(
 	channelDir: string,
 	workingDir: string,
 	getProfileRuntime?: () => ProfileRuntime | null,
+	getReactRuntime?: () => ReactRuntime | null,
 ): AgentRunner {
 	const existing = channelRunners.get(runnerKey);
 	if (existing) return existing;
-	const runner = createRunner(sandboxConfig, transport, runnerKey, channelDir, workingDir, getProfileRuntime);
+	const runner = createRunner(
+		sandboxConfig,
+		transport,
+		runnerKey,
+		channelDir,
+		workingDir,
+		getProfileRuntime,
+		getReactRuntime,
+	);
 	channelRunners.set(runnerKey, runner);
 	return runner;
 }
@@ -521,6 +540,7 @@ function createRunner(
 	channelDir: string,
 	workingDir: string,
 	getProfileRuntime?: () => ProfileRuntime | null,
+	getReactRuntime?: () => ReactRuntime | null,
 ): AgentRunner {
 	const executor = createExecutor(sandboxConfig);
 	const workspacePath = executor.getWorkspacePath(workingDir);
@@ -597,6 +617,7 @@ function createRunner(
 		},
 		() => runState.ctx,
 		getProfileRuntime ?? (() => null),
+		getReactRuntime ?? (() => null),
 	);
 
 	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills)
@@ -936,7 +957,11 @@ function createRunner(
 				const timestamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}${offsetSign}${offsetHours}:${offsetMins}`;
 				let userMessage = `[${timestamp}] [${ctx.message.userName || "unknown"}]: ${ctx.message.text}`;
 
-				// Add attachment paths if any (convert to absolute paths in execution environment)
+				if (ctx.message.reactions && ctx.message.reactions.length > 0) {
+					const reactionList = ctx.message.reactions.map((r) => `${r.emoji} (${r.count})`).join(", ");
+					userMessage += `\nReactions: ${reactionList}`;
+				}
+
 				if (ctx.message.attachments && ctx.message.attachments.length > 0) {
 					const attachmentPaths = ctx.message.attachments.map((a) => `${workspacePath}/${a.local}`).join("\n");
 					userMessage += `\n\n<attachments>\n${attachmentPaths}\n</attachments>`;

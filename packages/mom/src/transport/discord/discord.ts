@@ -110,8 +110,9 @@ export class MomDiscordBot {
 				GatewayIntentBits.MessageContent,
 				GatewayIntentBits.DirectMessages,
 				GatewayIntentBits.GuildMembers,
+				GatewayIntentBits.GuildMessageReactions,
 			],
-			partials: [Partials.Channel],
+			partials: [Partials.Channel, Partials.Reaction],
 		});
 		this.store = new DiscordChannelStore({ workingDir: config.workingDir });
 
@@ -934,6 +935,11 @@ export class MomDiscordBot {
 			throw new Error(`Unsupported Discord channel type for sending messages (channelId=${message.channel.id})`);
 		}
 
+		const reactions = message.reactions.cache.map((r) => ({
+			emoji: r.emoji.name || r.emoji.toString(),
+			count: r.count,
+		}));
+
 		return this.createDiscordContext({
 			workingDir,
 			channelDir,
@@ -949,6 +955,7 @@ export class MomDiscordBot {
 				channelId: message.channel.id,
 				messageId: message.id,
 				attachments,
+				reactions: reactions.length > 0 ? reactions : undefined,
 			},
 			sendTyping: async () => {
 				const maybeSendTyping = (channel as { sendTyping?: unknown }).sendTyping;
@@ -1168,6 +1175,26 @@ export class MomDiscordBot {
 		});
 
 		return true;
+	}
+
+	async addReaction(
+		channelId: string,
+		messageId: string,
+		emoji: string,
+	): Promise<{ success: boolean; message: string }> {
+		try {
+			const channel = await this.client.channels.fetch(channelId);
+			if (!channel || !channel.isTextBased()) {
+				return { success: false, message: `Channel ${channelId} not found or not text-based` };
+			}
+			const message = await (channel as { messages: { fetch: (id: string) => Promise<Message> } }).messages.fetch(
+				messageId,
+			);
+			await message.react(emoji);
+			return { success: true, message: `Reacted with ${emoji}` };
+		} catch (err) {
+			return { success: false, message: err instanceof Error ? err.message : String(err) };
+		}
 	}
 }
 

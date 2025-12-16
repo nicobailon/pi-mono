@@ -5,6 +5,7 @@ import { createAttachTool, type UploadFunction } from "./attach.js";
 import { createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
 import { createProfileTool, type ProfileRuntime } from "./profile.js";
+import { createReactTool, type ReactRuntime } from "./react.js";
 import { createReadTool } from "./read.js";
 import { createWriteTool } from "./write.js";
 
@@ -13,6 +14,7 @@ export function createMomTools(
 	getUploadFunction: () => UploadFunction | null,
 	getCtx: () => TransportContext | null,
 	getProfileRuntime: () => ProfileRuntime | null,
+	getReactRuntime: () => ReactRuntime | null,
 ): AgentTool<any>[] {
 	return [
 		createReadTool(executor),
@@ -21,5 +23,6 @@ export function createMomTools(
 		createWriteTool(executor),
 		createAttachTool(getUploadFunction),
 		createProfileTool(getCtx, getProfileRuntime),
+		createReactTool(getCtx, getReactRuntime),
 	];
 }

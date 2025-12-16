@@ -10,6 +10,7 @@ import * as log from "./log.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
 import { ChannelStore } from "./store.js";
 import type { ProfileRuntime } from "./tools/profile.js";
+import type { ReactRuntime } from "./tools/react.js";
 import {
 	createMemoryEditModal,
 	getMemoryPath,
@@ -204,13 +205,21 @@ async function startSlackBot({ workingDir, sandbox }: { workingDir: string; sand
 		};
 	};
 
+	const getReactRuntime = (): ReactRuntime | null => {
+		const bot = slackBot;
+		if (!bot) return null;
+		return {
+			addReaction: (channelId, messageId, emoji) => bot.addReaction(channelId, messageId, emoji),
+		};
+	};
+
 	function getState(channelId: string): ChannelState {
 		let state = channelStates.get(channelId);
 		if (!state) {
 			const channelDir = join(workingDir, channelId);
 			state = {
 				running: false,
-				runner: getOrCreateRunner(sandbox, channelId, channelDir, getProfileRuntime),
+				runner: getOrCreateRunner(sandbox, channelId, channelDir, getProfileRuntime, getReactRuntime),
 				stopRequested: false,
 			};
 			channelStates.set(channelId, state);
@@ -377,9 +386,15 @@ async function startDiscordBot({ workingDir, sandbox }: { workingDir: string; sa
 
 		log.logUserMessage(logCtx, ctx.message.text);
 
-		const runner = getOrCreateRunnerForTransport(sandbox, "discord", runnerKey, ctx.channelDir, workingDir, () => ({
-			updateDiscordProfile: async (updates) => bot.updateProfile(updates),
-		}));
+		const runner = getOrCreateRunnerForTransport(
+			sandbox,
+			"discord",
+			runnerKey,
+			ctx.channelDir,
+			workingDir,
+			() => ({ updateDiscordProfile: async (updates) => bot.updateProfile(updates) }),
+			() => ({ addReaction: (channelId, messageId, emoji) => bot.addReaction(channelId, messageId, emoji) }),
+		);
 		activeRuns.set(runnerKey, { runner, stopRequested: false });
 
 		try {
@@ -508,9 +523,8 @@ async function startDiscordBot({ workingDir, sandbox }: { workingDir: string; sa
 				runnerKey,
 				ctx.channelDir,
 				workingDir,
-				() => ({
-					updateDiscordProfile: async (updates) => bot.updateProfile(updates),
-				}),
+				() => ({ updateDiscordProfile: async (updates) => bot.updateProfile(updates) }),
+				() => ({ addReaction: (channelId, messageId, emoji) => bot.addReaction(channelId, messageId, emoji) }),
 			);
 			activeRuns.set(runnerKey, { runner, stopRequested: false });
 

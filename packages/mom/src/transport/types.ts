@@ -70,6 +70,7 @@ export interface TransportContext {
 		channelId: string;
 		messageId: string; // Slack: ts, Discord: snowflake
 		attachments: Array<{ local: string }>;
+		reactions?: Array<{ emoji: string; count: number }>;
 	};
 
 	// Used for system prompt channel/user mapping
