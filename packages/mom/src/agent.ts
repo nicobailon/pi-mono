@@ -782,10 +782,7 @@ function createRunner(
 				if (text.trim()) {
 					log.logResponse(logCtx, text);
 					queue.enqueueMessage(text, "response", "text output");
-					// Slack uses threads for verbose output; Discord doesn't need details text (only tool embeds)
-					if (ctx.transport === "slack") {
-						queue.enqueueMessage(text, "details", "response details", false);
-					}
+					queue.enqueueMessage(text, "details", "response details", false);
 				}
 				break;
 			}
