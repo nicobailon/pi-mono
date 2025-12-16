@@ -782,7 +782,9 @@ function createRunner(
 				if (text.trim()) {
 					log.logResponse(logCtx, text);
 					queue.enqueueMessage(text, "response", "text output");
-					queue.enqueueMessage(text, "details", "response details", false);
+					if (ctx.transport === "slack") {
+						queue.enqueueMessage(text, "details", "response details", false);
+					}
 				}
 				break;
 			}
