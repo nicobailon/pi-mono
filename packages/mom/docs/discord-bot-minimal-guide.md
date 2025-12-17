@@ -111,13 +111,15 @@ Create `settings.json` in your workspace directory:
   "defaultModel": "claude-sonnet-4-20250514",
   "defaultThinkingLevel": "off",
   "usageSummary": true,
-  "showDetails": true
+  "showDetails": true,
+  "showToolResults": true
 }
 ```
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `showDetails` | `true` | Show "Details" thread with tool results, usage summary, and errors |
+| `showDetails` | `true` | Show usage summary and errors in details thread |
+| `showToolResults` | `true` | Show tool call results in details thread |
 | `usageSummary` | `true` | Show usage stats (requires `showDetails: true` to display) |
 
 ### Bot Profile (Optional)

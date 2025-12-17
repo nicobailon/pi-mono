@@ -728,7 +728,7 @@ function createRunner(
 					durationSecs,
 				};
 
-				if (ctx.showDetails) {
+				if (ctx.showToolResults) {
 					if (ctx.sendToolResult) {
 						queue.enqueue(() => ctx.sendToolResult!(payload), "tool result");
 					} else {

@@ -355,6 +355,7 @@ export interface MomSettings {
 	allowDMs?: boolean | AllowDMsPerTransport;
 	dmAllowlist?: string[];
 	showDetails?: boolean;
+	showToolResults?: boolean;
 }
 
 const DEFAULT_COMPACTION: MomCompactionSettings = {
@@ -566,6 +567,10 @@ export class MomSettingsManager {
 
 	get showDetails(): boolean {
 		return this.settings.showDetails ?? true;
+	}
+
+	get showToolResults(): boolean {
+		return this.settings.showToolResults ?? true;
 	}
 
 	setDiscordProfile(profile: Partial<DiscordProfileSettings>): void {

@@ -88,8 +88,11 @@ export interface TransportContext {
 	// Discord threads include the parent message, so duplicating would show text twice.
 	duplicateResponseToDetails: boolean;
 
-	// When false, suppresses all "details" output (tool results, usage summaries, errors in threads).
+	// When false, suppresses usage summaries and errors in details thread.
 	showDetails: boolean;
+
+	// When false, suppresses tool call results in details thread.
+	showToolResults: boolean;
 
 	// Messaging API
 	send(target: ReplyTarget, text: string, opts?: { log?: boolean }): Promise<void>;
