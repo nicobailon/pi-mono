@@ -102,11 +102,11 @@ async function runInteractiveMode(
 
 	// Interactive loop
 	while (true) {
-		const userInput = await mode.getUserInput();
+		const { text, attachments } = await mode.getUserInput();
 
 		// Process the message
 		try {
-			await session.prompt(userInput);
+			await session.prompt(text, { attachments });
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);

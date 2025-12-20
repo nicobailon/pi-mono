@@ -312,16 +312,31 @@ export function renderImage(
 	}
 
 	const maxWidth = options.maxWidthCells ?? 80;
-	const rows = calculateImageRows(imageDimensions, maxWidth, getCellDimensions());
+	let targetWidth = maxWidth;
+	const cellDims = getCellDimensions();
+	let rows = calculateImageRows(imageDimensions, targetWidth, cellDims);
+
+	if (options.maxHeightCells !== undefined && rows > options.maxHeightCells) {
+		const maxHeightPx = options.maxHeightCells * cellDims.heightPx;
+		const maxWidthPxByHeight = (maxHeightPx * imageDimensions.widthPx) / imageDimensions.heightPx;
+		const widthCellsByHeight = Math.max(1, Math.floor(maxWidthPxByHeight / cellDims.widthPx));
+		targetWidth = Math.max(1, Math.min(targetWidth, widthCellsByHeight));
+		rows = calculateImageRows(imageDimensions, targetWidth, cellDims);
+
+		while (rows > options.maxHeightCells && targetWidth > 1) {
+			targetWidth -= 1;
+			rows = calculateImageRows(imageDimensions, targetWidth, cellDims);
+		}
+	}
 
 	if (caps.images === "kitty") {
-		const sequence = encodeKitty(base64Data, { columns: maxWidth, rows });
+		const sequence = encodeKitty(base64Data, { columns: targetWidth, rows });
 		return { sequence, rows };
 	}
 
 	if (caps.images === "iterm2") {
 		const sequence = encodeITerm2(base64Data, {
-			width: maxWidth,
+			width: targetWidth,
 			height: "auto",
 			preserveAspectRatio: options.preserveAspectRatio ?? true,
 		});

@@ -127,6 +127,14 @@ export class TUI extends Container {
 		});
 	}
 
+	forceFullRender(): void {
+		this.previousLines = [];
+		this.previousWidth = 0;
+		this.terminal.write("\x1b[2J\x1b[H");
+		this.cursorRow = 0;
+		this.requestRender();
+	}
+
 	private handleInput(data: string): void {
 		// If we're waiting for cell size response, buffer input and parse
 		if (this.cellSizeQueryPending) {

@@ -9,7 +9,7 @@ export {
 } from "./autocomplete.js";
 // Components
 export { Box } from "./components/box.js";
-export { Editor, type EditorTheme } from "./components/editor.js";
+export { type AtomicMarker, Editor, type EditorTheme } from "./components/editor.js";
 export { Image, type ImageOptions, type ImageTheme } from "./components/image.js";
 export { Input } from "./components/input.js";
 export { Loader } from "./components/loader.js";
@@ -28,6 +28,7 @@ export {
 	isCtrlK,
 	isCtrlO,
 	isCtrlP,
+	isCtrlShiftV,
 	isCtrlT,
 	isCtrlU,
 	isCtrlW,

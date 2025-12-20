@@ -24,6 +24,13 @@ export interface EditorTheme {
 	selectList: SelectListTheme;
 }
 
+export interface AtomicMarker {
+	id: string;
+	text: string;
+}
+
+type MarkerOccurrence = { marker: AtomicMarker; startCol: number; endCol: number };
+
 export class Editor implements Component {
 	private state: EditorState = {
 		lines: [""],
@@ -57,8 +64,12 @@ export class Editor implements Component {
 	private history: string[] = [];
 	private historyIndex: number = -1; // -1 = not browsing, 0 = most recent, 1 = older, etc.
 
+	private atomicMarkers: Map<string, AtomicMarker> = new Map();
+
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
+	public onPaste?: (pastedText: string) => boolean;
+	public onAtomicMarkerDeleted?: (id: string) => void;
 	public disableSubmit: boolean = false;
 
 	constructor(theme: EditorTheme) {
@@ -422,6 +433,7 @@ export class Editor implements Component {
 			};
 			this.pastes.clear();
 			this.pasteCounter = 0;
+			this.atomicMarkers.clear();
 			this.historyIndex = -1; // Exit history browsing mode
 
 			// Notify that editor is now empty
@@ -606,6 +618,65 @@ export class Editor implements Component {
 		return { line: this.state.cursorLine, col: this.state.cursorCol };
 	}
 
+	public insertAtomicMarker(id: string, text: string): void {
+		this.historyIndex = -1; // Exit history browsing mode
+
+		this.atomicMarkers.set(id, { id, text });
+
+		const line = this.state.lines[this.state.cursorLine] || "";
+		const before = line.slice(0, this.state.cursorCol);
+		const after = line.slice(this.state.cursorCol);
+
+		this.state.lines[this.state.cursorLine] = before + text + after;
+		this.state.cursorCol += text.length;
+
+		if (this.onChange) {
+			this.onChange(this.getText());
+		}
+
+		if (this.isAutocompleting) {
+			this.updateAutocomplete();
+		} else {
+			const currentLine = this.state.lines[this.state.cursorLine] || "";
+			const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
+			if (textBeforeCursor.trimStart().startsWith("/")) {
+				this.tryTriggerAutocomplete();
+			} else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+				this.tryTriggerAutocomplete();
+			}
+		}
+	}
+
+	public clearAtomicMarkers(): void {
+		if (this.atomicMarkers.size === 0) return;
+
+		this.historyIndex = -1; // Exit history browsing mode
+
+		const markers = Array.from(this.atomicMarkers.values());
+		this.atomicMarkers.clear();
+
+		for (let i = 0; i < this.state.lines.length; i++) {
+			const line = this.state.lines[i] || "";
+			let updated = line;
+			for (const marker of markers) {
+				if (!marker.text) continue;
+				updated = updated.split(marker.text).join("");
+			}
+			this.state.lines[i] = updated;
+		}
+
+		const currentLine = this.state.lines[this.state.cursorLine] || "";
+		this.state.cursorCol = Math.min(this.state.cursorCol, currentLine.length);
+
+		if (this.onChange) {
+			this.onChange(this.getText());
+		}
+	}
+
+	public getAtomicMarkerIds(): string[] {
+		return Array.from(this.atomicMarkers.keys());
+	}
+
 	setText(text: string): void {
 		this.historyIndex = -1; // Exit history browsing mode
 		this.setTextInternal(text);
@@ -675,6 +746,9 @@ export class Editor implements Component {
 			.split("")
 			.filter((char) => char === "\n" || char.charCodeAt(0) >= 32)
 			.join("");
+
+		const handled = this.onPaste?.(filteredText) ?? false;
+		if (handled) return;
 
 		// Split into lines
 		const pastedLines = filteredText.split("\n");
@@ -776,14 +850,24 @@ export class Editor implements Component {
 		this.historyIndex = -1; // Exit history browsing mode
 
 		if (this.state.cursorCol > 0) {
-			// Delete character in current line
-			const line = this.state.lines[this.state.cursorLine] || "";
+			const markerAtEnd = this.findMarkerOccurrenceEndingAt(this.state.cursorLine, this.state.cursorCol);
+			if (markerAtEnd) {
+				const line = this.state.lines[this.state.cursorLine] || "";
+				this.state.lines[this.state.cursorLine] =
+					line.slice(0, markerAtEnd.startCol) + line.slice(markerAtEnd.endCol);
+				this.state.cursorCol = markerAtEnd.startCol;
+				this.atomicMarkers.delete(markerAtEnd.marker.id);
+				this.onAtomicMarkerDeleted?.(markerAtEnd.marker.id);
+			} else {
+				// Delete character in current line
+				const line = this.state.lines[this.state.cursorLine] || "";
 
-			const before = line.slice(0, this.state.cursorCol - 1);
-			const after = line.slice(this.state.cursorCol);
+				const before = line.slice(0, this.state.cursorCol - 1);
+				const after = line.slice(this.state.cursorCol);
 
-			this.state.lines[this.state.cursorLine] = before + after;
-			this.state.cursorCol--;
+				this.state.lines[this.state.cursorLine] = before + after;
+				this.state.cursorCol--;
+			}
 		} else if (this.state.cursorLine > 0) {
 			// Merge with previous line
 			const currentLine = this.state.lines[this.state.cursorLine] || "";
@@ -834,8 +918,14 @@ export class Editor implements Component {
 
 		if (this.state.cursorCol > 0) {
 			// Delete from start of line up to cursor
-			this.state.lines[this.state.cursorLine] = currentLine.slice(this.state.cursorCol);
-			this.state.cursorCol = 0;
+			const { startCol, endCol, deletedMarkers } = this.expandDeletionRangeWithMarkers(
+				this.state.cursorLine,
+				0,
+				this.state.cursorCol,
+			);
+			this.state.lines[this.state.cursorLine] = currentLine.slice(0, startCol) + currentLine.slice(endCol);
+			this.state.cursorCol = startCol;
+			this.removeMarkers(deletedMarkers);
 		} else if (this.state.cursorLine > 0) {
 			// At start of line - merge with previous line
 			const previousLine = this.state.lines[this.state.cursorLine - 1] || "";
@@ -857,7 +947,14 @@ export class Editor implements Component {
 
 		if (this.state.cursorCol < currentLine.length) {
 			// Delete from cursor to end of line
-			this.state.lines[this.state.cursorLine] = currentLine.slice(0, this.state.cursorCol);
+			const { startCol, endCol, deletedMarkers } = this.expandDeletionRangeWithMarkers(
+				this.state.cursorLine,
+				this.state.cursorCol,
+				currentLine.length,
+			);
+			this.state.lines[this.state.cursorLine] = currentLine.slice(0, startCol) + currentLine.slice(endCol);
+			this.state.cursorCol = startCol;
+			this.removeMarkers(deletedMarkers);
 		} else if (this.state.cursorLine < this.state.lines.length - 1) {
 			// At end of line - merge with next line
 			const nextLine = this.state.lines[this.state.cursorLine + 1] || "";
@@ -910,9 +1007,14 @@ export class Editor implements Component {
 				}
 			}
 
-			this.state.lines[this.state.cursorLine] =
-				currentLine.slice(0, deleteFrom) + currentLine.slice(this.state.cursorCol);
-			this.state.cursorCol = deleteFrom;
+			const { startCol, endCol, deletedMarkers } = this.expandDeletionRangeWithMarkers(
+				this.state.cursorLine,
+				deleteFrom,
+				this.state.cursorCol,
+			);
+			this.state.lines[this.state.cursorLine] = currentLine.slice(0, startCol) + currentLine.slice(endCol);
+			this.state.cursorCol = startCol;
+			this.removeMarkers(deletedMarkers);
 		}
 
 		if (this.onChange) {
@@ -926,10 +1028,18 @@ export class Editor implements Component {
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
 
 		if (this.state.cursorCol < currentLine.length) {
-			// Delete character at cursor position (forward delete)
-			const before = currentLine.slice(0, this.state.cursorCol);
-			const after = currentLine.slice(this.state.cursorCol + 1);
-			this.state.lines[this.state.cursorLine] = before + after;
+			const markerAtStart = this.findMarkerOccurrenceStartingAt(this.state.cursorLine, this.state.cursorCol);
+			if (markerAtStart) {
+				this.state.lines[this.state.cursorLine] =
+					currentLine.slice(0, markerAtStart.startCol) + currentLine.slice(markerAtStart.endCol);
+				this.atomicMarkers.delete(markerAtStart.marker.id);
+				this.onAtomicMarkerDeleted?.(markerAtStart.marker.id);
+			} else {
+				// Delete character at cursor position (forward delete)
+				const before = currentLine.slice(0, this.state.cursorCol);
+				const after = currentLine.slice(this.state.cursorCol + 1);
+				this.state.lines[this.state.cursorLine] = before + after;
+			}
 		} else if (this.state.cursorLine < this.state.lines.length - 1) {
 			// At end of line - merge with next line
 			const nextLine = this.state.lines[this.state.cursorLine + 1] || "";
@@ -1062,6 +1172,11 @@ export class Editor implements Component {
 					const targetCol = targetVL.startCol + Math.min(visualCol, targetVL.length);
 					const logicalLine = this.state.lines[targetVL.logicalLine] || "";
 					this.state.cursorCol = Math.min(targetCol, logicalLine.length);
+					this.state.cursorCol = this.snapCursorOutOfMarker(
+						targetVL.logicalLine,
+						this.state.cursorCol,
+						deltaLine > 0,
+					);
 				}
 			}
 		}
@@ -1087,6 +1202,27 @@ export class Editor implements Component {
 					this.state.cursorLine--;
 					const prevLine = this.state.lines[this.state.cursorLine] || "";
 					this.state.cursorCol = prevLine.length;
+				}
+			}
+			if (deltaCol > 0) {
+				const markerAtStart = this.findMarkerOccurrenceStartingAt(this.state.cursorLine, this.state.cursorCol);
+				if (markerAtStart) {
+					this.state.cursorCol = markerAtStart.endCol;
+				} else {
+					const markerAtCursor = this.findMarkerOccurrenceAt(this.state.cursorLine, this.state.cursorCol);
+					if (markerAtCursor) {
+						this.state.cursorCol = markerAtCursor.endCol;
+					}
+				}
+			} else {
+				const markerAtEnd = this.findMarkerOccurrenceEndingAt(this.state.cursorLine, this.state.cursorCol);
+				if (markerAtEnd) {
+					this.state.cursorCol = markerAtEnd.startCol;
+				} else {
+					const markerAtCursor = this.findMarkerOccurrenceAt(this.state.cursorLine, this.state.cursorCol);
+					if (markerAtCursor) {
+						this.state.cursorCol = markerAtCursor.startCol;
+					}
 				}
 			}
 		}
@@ -1127,7 +1263,8 @@ export class Editor implements Component {
 			newCol -= 1;
 		}
 
-		this.state.cursorCol = newCol;
+		const markerAtCursor = this.findMarkerOccurrenceAt(this.state.cursorLine, newCol);
+		this.state.cursorCol = markerAtCursor ? markerAtCursor.startCol : newCol;
 	}
 
 	private moveWordForwards(): void {
@@ -1159,7 +1296,8 @@ export class Editor implements Component {
 			newCol += 1;
 		}
 
-		this.state.cursorCol = newCol;
+		const markerAtCursor = this.findMarkerOccurrenceAt(this.state.cursorLine, newCol);
+		this.state.cursorCol = markerAtCursor ? markerAtCursor.endCol : newCol;
 	}
 
 	// Helper method to check if cursor is at start of message (for slash command detection)
@@ -1280,6 +1418,114 @@ https://github.com/EsotericSoftware/spine-runtimes/actions/runs/19536643416/job/
 			const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
 
 			this.cancelAutocomplete();
+		}
+	}
+
+	private getMarkerOccurrencesForLine(lineIndex: number): MarkerOccurrence[] {
+		if (this.atomicMarkers.size === 0) return [];
+		const line = this.state.lines[lineIndex] || "";
+		if (!line) return [];
+
+		const occurrences: MarkerOccurrence[] = [];
+		for (const marker of this.atomicMarkers.values()) {
+			if (!marker.text) continue;
+			let searchIndex = 0;
+			while (searchIndex <= line.length) {
+				const idx = line.indexOf(marker.text, searchIndex);
+				if (idx === -1) break;
+				occurrences.push({ marker, startCol: idx, endCol: idx + marker.text.length });
+				searchIndex = idx + marker.text.length;
+			}
+		}
+
+		occurrences.sort((a, b) => a.startCol - b.startCol || b.endCol - a.endCol);
+		return occurrences;
+	}
+
+	private findMarkerOccurrenceAt(lineIndex: number, col: number): MarkerOccurrence | null {
+		const occurrences = this.getMarkerOccurrencesForLine(lineIndex);
+		for (const occurrence of occurrences) {
+			if (col > occurrence.startCol && col < occurrence.endCol) {
+				return occurrence;
+			}
+		}
+		return null;
+	}
+
+	private findMarkerOccurrenceStartingAt(lineIndex: number, col: number): MarkerOccurrence | null {
+		const occurrences = this.getMarkerOccurrencesForLine(lineIndex);
+		for (const occurrence of occurrences) {
+			if (occurrence.startCol === col) {
+				return occurrence;
+			}
+		}
+		return null;
+	}
+
+	private findMarkerOccurrenceEndingAt(lineIndex: number, col: number): MarkerOccurrence | null {
+		const occurrences = this.getMarkerOccurrencesForLine(lineIndex);
+		for (const occurrence of occurrences) {
+			if (occurrence.endCol === col) {
+				return occurrence;
+			}
+		}
+		return null;
+	}
+
+	private snapCursorOutOfMarker(lineIndex: number, col: number, preferEndOnTie: boolean): number {
+		const occurrence = this.findMarkerOccurrenceAt(lineIndex, col);
+		if (!occurrence) return col;
+
+		const distToStart = col - occurrence.startCol;
+		const distToEnd = occurrence.endCol - col;
+		if (distToStart === distToEnd) {
+			return preferEndOnTie ? occurrence.endCol : occurrence.startCol;
+		}
+		return distToStart < distToEnd ? occurrence.startCol : occurrence.endCol;
+	}
+
+	private expandDeletionRangeWithMarkers(
+		lineIndex: number,
+		startCol: number,
+		endCol: number,
+	): { startCol: number; endCol: number; deletedMarkers: AtomicMarker[] } {
+		const occurrences = this.getMarkerOccurrencesForLine(lineIndex);
+		if (occurrences.length === 0 || startCol === endCol) {
+			return { startCol, endCol, deletedMarkers: [] };
+		}
+
+		let expandedStart = startCol;
+		let expandedEnd = endCol;
+		let changed = true;
+		while (changed) {
+			changed = false;
+			for (const occurrence of occurrences) {
+				const overlaps = expandedStart < occurrence.endCol && expandedEnd > occurrence.startCol;
+				if (!overlaps) continue;
+				if (occurrence.startCol < expandedStart) {
+					expandedStart = occurrence.startCol;
+					changed = true;
+				}
+				if (occurrence.endCol > expandedEnd) {
+					expandedEnd = occurrence.endCol;
+					changed = true;
+				}
+			}
+		}
+
+		const deletedMarkers = occurrences
+			.filter((occurrence) => expandedStart < occurrence.endCol && expandedEnd > occurrence.startCol)
+			.map((occurrence) => occurrence.marker);
+
+		return { startCol: expandedStart, endCol: expandedEnd, deletedMarkers };
+	}
+
+	private removeMarkers(markers: AtomicMarker[]): void {
+		if (markers.length === 0) return;
+		const ids = new Set(markers.map((marker) => marker.id));
+		for (const id of ids) {
+			this.atomicMarkers.delete(id);
+			this.onAtomicMarkerDeleted?.(id);
 		}
 	}
 }

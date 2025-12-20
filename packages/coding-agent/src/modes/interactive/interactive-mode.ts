@@ -5,7 +5,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentState, AppMessage, Attachment } from "@mariozechner/pi-agent-core";
+import type { AgentState, AppMessage, Attachment, UserMessageWithAttachments } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, Message } from "@mariozechner/pi-ai";
 import type { SlashCommand } from "@mariozechner/pi-tui";
 import {
@@ -37,6 +37,7 @@ import { loadProjectContextFiles } from "../../core/system-prompt.js";
 import type { TruncationResult } from "../../core/tools/truncate.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
+import { checkClipboardHasImages, getClipboardImages, isClipboardImageSupported } from "../../utils/clipboard-image.js";
 import { AssistantMessageComponent } from "./components/assistant-message.js";
 import { BashExecutionComponent } from "./components/bash-execution.js";
 import { CompactionComponent } from "./components/compaction.js";
@@ -45,6 +46,7 @@ import { DynamicBorder } from "./components/dynamic-border.js";
 import { FooterComponent } from "./components/footer.js";
 import { HookInputComponent } from "./components/hook-input.js";
 import { HookSelectorComponent } from "./components/hook-selector.js";
+import { ImageAttachmentsComponent } from "./components/image-attachments.js";
 import { ModelSelectorComponent } from "./components/model-selector.js";
 import { OAuthSelectorComponent } from "./components/oauth-selector.js";
 import { QueueModeSelectorComponent } from "./components/queue-mode-selector.js";
@@ -57,12 +59,18 @@ import { UserMessageComponent } from "./components/user-message.js";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.js";
 import { getEditorTheme, getMarkdownTheme, onThemeChange, setTheme, theme } from "./theme/theme.js";
 
+export interface UserInputResult {
+	text: string;
+	attachments?: Attachment[];
+}
+
 export class InteractiveMode {
 	private session: AgentSession;
 	private ui: TUI;
 	private chatContainer: Container;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
+	private imageAttachmentsContainer: Container;
 	private editor: CustomEditor;
 	private editorContainer: Container;
 	private footer: FooterComponent;
@@ -110,6 +118,10 @@ export class InteractiveMode {
 	private retryLoader: Loader | null = null;
 	private retryEscapeHandler?: () => void;
 
+	private pendingImages: Map<number, Attachment> = new Map();
+	private nextImageNumber = 1;
+	private imagePasteInFlight = false;
+
 	// Hook UI state
 	private hookSelector: HookSelectorComponent | null = null;
 	private hookInput: HookInputComponent | null = null;
@@ -144,6 +156,7 @@ export class InteractiveMode {
 		this.chatContainer = new Container();
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
+		this.imageAttachmentsContainer = new Container();
 		this.editor = new CustomEditor(getEditorTheme());
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor);
@@ -232,6 +245,9 @@ export class InteractiveMode {
 			theme.fg("dim", "!") +
 			theme.fg("muted", " to run bash") +
 			"\n" +
+			theme.fg("dim", "ctrl+shift+v") +
+			theme.fg("muted", " to paste image") +
+			"\n" +
 			theme.fg("dim", "drop files") +
 			theme.fg("muted", " to attach");
 		const header = new Text(logo + "\n" + instructions, 1, 0);
@@ -261,6 +277,7 @@ export class InteractiveMode {
 		this.ui.addChild(this.chatContainer);
 		this.ui.addChild(this.pendingMessagesContainer);
 		this.ui.addChild(this.statusContainer);
+		this.ui.addChild(this.imageAttachmentsContainer);
 		this.ui.addChild(new Spacer(1));
 		this.ui.addChild(this.editorContainer);
 		this.ui.addChild(this.footer);
@@ -558,6 +575,7 @@ export class InteractiveMode {
 				this.session.abortBash();
 			} else if (this.isBashMode) {
 				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				this.isBashMode = false;
 				this.updateEditorBorderColor();
 			} else if (!this.editor.getText().trim()) {
@@ -578,6 +596,28 @@ export class InteractiveMode {
 		this.editor.onCtrlP = () => this.cycleModel();
 		this.editor.onCtrlO = () => this.toggleToolOutputExpansion();
 		this.editor.onCtrlT = () => this.toggleThinkingBlockVisibility();
+		this.editor.onPasteImage = () => {
+			void this.handleClipboardImagePaste();
+		};
+		this.editor.onCtrlShiftV = async () => {
+			const hasImages = await checkClipboardHasImages();
+			if (hasImages) {
+				void this.handleClipboardImagePaste();
+				return true;
+			}
+			return false;
+		};
+		this.editor.onPasteImagePath = (path: string) => {
+			void this.handleImageFilePaste(path);
+		};
+		this.editor.onAtomicMarkerDeleted = (markerId: string) => {
+			const num = Number.parseInt(markerId.replace("pasted-image-", ""), 10);
+			if (!Number.isNaN(num)) {
+				this.pendingImages.delete(num);
+				this.renderImageThumbnails();
+				this.ui.forceFullRender();
+			}
+		};
 
 		this.editor.onChange = (text: string) => {
 			const wasBashMode = this.isBashMode;
@@ -592,76 +632,77 @@ export class InteractiveMode {
 		this.editor.onSubmit = async (text: string) => {
 			text = text.trim();
 			if (!text) return;
+			if (this.imagePasteInFlight) return;
 
 			// Handle slash commands
 			if (text === "/thinking") {
 				this.showThinkingSelector();
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				return;
 			}
 			if (text === "/model") {
 				this.showModelSelector();
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				return;
 			}
 			if (text.startsWith("/export")) {
 				this.handleExportCommand(text);
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				return;
 			}
 			if (text === "/copy") {
 				this.handleCopyCommand();
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				return;
 			}
 			if (text === "/session") {
 				this.handleSessionCommand();
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				return;
 			}
 			if (text === "/changelog") {
 				this.handleChangelogCommand();
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				return;
 			}
 			if (text === "/hotkeys") {
 				this.handleHotkeysCommand();
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				return;
 			}
 			if (text === "/branch") {
 				this.showUserMessageSelector();
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				return;
 			}
 			if (text === "/login") {
 				this.showOAuthSelector("login");
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				return;
 			}
 			if (text === "/logout") {
 				this.showOAuthSelector("logout");
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				return;
 			}
 			if (text === "/queue") {
 				this.showQueueModeSelector();
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				return;
 			}
 			if (text === "/theme") {
 				this.showThemeSelector();
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				return;
 			}
 			if (text === "/clear") {
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				await this.handleClearCommand();
 				return;
 			}
 			if (text === "/compact" || text.startsWith("/compact ")) {
 				const customInstructions = text.startsWith("/compact ") ? text.slice(9).trim() : undefined;
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				this.editor.disableSubmit = true;
 				try {
 					await this.handleCompactCommand(customInstructions);
@@ -672,22 +713,22 @@ export class InteractiveMode {
 			}
 			if (text === "/autocompact") {
 				this.handleAutocompactCommand();
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				return;
 			}
 			if (text === "/show-images") {
 				this.showShowImagesSelector();
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				return;
 			}
 			if (text === "/debug") {
 				this.handleDebugCommand();
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				return;
 			}
 			if (text === "/resume") {
 				this.showSessionSelector();
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				return;
 			}
 
@@ -718,7 +759,7 @@ export class InteractiveMode {
 				await this.session.queueMessage(text);
 				this.updatePendingMessagesDisplay();
 				this.editor.addToHistory(text);
-				this.editor.setText("");
+				this.clearEditorAndPendingImages();
 				this.ui.requestRender();
 				return;
 			}
@@ -732,6 +773,129 @@ export class InteractiveMode {
 			}
 			this.editor.addToHistory(text);
 		};
+	}
+
+	private async handleClipboardImagePaste(): Promise<void> {
+		if (this.session.isStreaming) {
+			this.showWarning("Cannot paste images while agent is responding");
+			return;
+		}
+		if (this.isBashMode) {
+			return;
+		}
+		if (!isClipboardImageSupported()) {
+			this.showWarning("Clipboard image paste is only supported on macOS");
+			return;
+		}
+
+		this.imagePasteInFlight = true;
+		try {
+			const images = await getClipboardImages();
+			if (images.length === 0) return;
+
+			for (const image of images) {
+				const num = this.nextImageNumber++;
+				const markerId = `pasted-image-${num}`;
+				const markerText = `[Pasted Image ${num}]`;
+				const boundAttachment: Attachment = { ...image, id: `${markerId}:${image.id}` };
+
+				this.pendingImages.set(num, boundAttachment);
+				this.editor.insertAtomicMarker(markerId, markerText);
+			}
+
+			this.renderImageThumbnails();
+			this.ui.requestRender();
+		} catch {
+			this.showWarning("Failed to read clipboard image");
+		} finally {
+			this.imagePasteInFlight = false;
+		}
+	}
+
+	private async handleImageFilePaste(filePath: string): Promise<void> {
+		if (this.session.isStreaming) {
+			this.showWarning("Cannot paste images while agent is responding");
+			return;
+		}
+		if (this.isBashMode) {
+			return;
+		}
+
+		this.imagePasteInFlight = true;
+		try {
+			const fs = await import("node:fs/promises");
+			const path = await import("node:path");
+			const os = await import("node:os");
+
+			if (filePath.startsWith("~")) {
+				filePath = path.join(os.homedir(), filePath.slice(1));
+			}
+
+			const stats = await fs.stat(filePath);
+			if (!stats.isFile()) return;
+
+			const data = await fs.readFile(filePath);
+			const base64 = data.toString("base64");
+			const ext = path.extname(filePath).toLowerCase();
+
+			const mimeTypes: Record<string, string> = {
+				".png": "image/png",
+				".jpg": "image/jpeg",
+				".jpeg": "image/jpeg",
+				".gif": "image/gif",
+				".webp": "image/webp",
+				".bmp": "image/bmp",
+				".tiff": "image/tiff",
+				".tif": "image/tiff",
+			};
+			const mimeType = mimeTypes[ext] || "image/png";
+
+			const num = this.nextImageNumber++;
+			const markerId = `pasted-image-${num}`;
+			const markerText = `[Pasted Image ${num}]`;
+			const fileName = path.basename(filePath);
+			const attachment: Attachment = {
+				id: `${markerId}:file:${fileName}`,
+				type: "image",
+				fileName,
+				mimeType,
+				size: data.length,
+				content: base64,
+			};
+
+			this.pendingImages.set(num, attachment);
+			this.editor.insertAtomicMarker(markerId, markerText);
+			this.renderImageThumbnails();
+			this.ui.requestRender();
+		} catch {
+			this.showWarning("Failed to read image file");
+		} finally {
+			this.imagePasteInFlight = false;
+		}
+	}
+
+	private renderImageThumbnails(): void {
+		this.imageAttachmentsContainer.clear();
+		if (this.pendingImages.size === 0) return;
+
+		const images = Array.from(this.pendingImages.entries())
+			.map(([num, attachment]) => ({ num, attachment }))
+			.sort((a, b) => a.num - b.num);
+
+		this.imageAttachmentsContainer.addChild(new ImageAttachmentsComponent(images));
+	}
+
+	private clearPendingImagesAndThumbnailsOnly(): void {
+		this.pendingImages.clear();
+		this.nextImageNumber = 1;
+		this.editor.clearAtomicMarkers();
+		this.renderImageThumbnails();
+		this.ui.requestRender();
+	}
+
+	private clearEditorAndPendingImages(): void {
+		this.editor.setText("");
+		this.clearPendingImagesAndThumbnailsOnly();
 	}
 
 	private subscribeToAgent(): void {
@@ -766,7 +930,7 @@ export class InteractiveMode {
 			case "message_start":
 				if (event.message.role === "user") {
 					this.addMessageToChat(event.message);
-					this.editor.setText("");
+					this.clearEditorAndPendingImages();
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
@@ -1010,9 +1174,10 @@ export class InteractiveMode {
 		}
 
 		if (message.role === "user") {
-			const textContent = this.getUserMessageText(message);
-			if (textContent) {
-				const userComponent = new UserMessageComponent(textContent, this.isFirstUserMessage);
+			const textContent = this.getUserMessageText(message as Message);
+			const attachments = (message as UserMessageWithAttachments).attachments;
+			if (textContent || attachments?.length) {
+				const userComponent = new UserMessageComponent(textContent, this.isFirstUserMessage, attachments);
 				this.chatContainer.addChild(userComponent);
 				this.isFirstUserMessage = false;
 			}
@@ -1049,15 +1214,16 @@ export class InteractiveMode {
 			}
 
 			if (message.role === "user") {
-				const textContent = this.getUserMessageText(message);
-				if (textContent) {
+				const textContent = this.getUserMessageText(message as Message);
+				const attachments = (message as UserMessageWithAttachments).attachments;
+				if (textContent || attachments?.length) {
 					if (textContent.startsWith(SUMMARY_PREFIX) && compactionEntry) {
 						const summary = textContent.slice(SUMMARY_PREFIX.length, -SUMMARY_SUFFIX.length);
 						const component = new CompactionComponent(compactionEntry.tokensBefore, summary);
 						component.setExpanded(this.toolOutputExpanded);
 						this.chatContainer.addChild(component);
 					} else {
-						const userComponent = new UserMessageComponent(textContent, this.isFirstUserMessage);
+						const userComponent = new UserMessageComponent(textContent, this.isFirstUserMessage, attachments);
 						this.chatContainer.addChild(userComponent);
 						this.isFirstUserMessage = false;
 						if (options.populateHistory) {
@@ -1117,11 +1283,13 @@ export class InteractiveMode {
 		}
 	}
 
-	async getUserInput(): Promise<string> {
+	async getUserInput(): Promise<UserInputResult> {
 		return new Promise((resolve) => {
 			this.onInputCallback = (text: string) => {
 				this.onInputCallback = undefined;
-				resolve(text);
+				const attachments = this.pendingImages.size > 0 ? Array.from(this.pendingImages.values()) : undefined;
+				this.clearPendingImagesAndThumbnailsOnly();
+				resolve({ text, attachments });
 			};
 		});
 	}
@@ -1223,6 +1391,7 @@ export class InteractiveMode {
 
 	clearEditor(): void {
 		this.editor.setText("");
+		this.clearEditorAndPendingImages();
 		this.ui.requestRender();
 	}
 
@@ -1686,6 +1855,7 @@ export class InteractiveMode {
 | \`Ctrl+P\` | Cycle models |
 | \`Ctrl+O\` | Toggle tool output expansion |
 | \`Ctrl+T\` | Toggle thinking block visibility |
+| \`Ctrl+Shift+V\` | Paste image from clipboard |
 | \`/\` | Slash commands |
 | \`!\` | Run bash command |
 `;
@@ -1705,6 +1875,7 @@ export class InteractiveMode {
 			this.loadingAnimation = null;
 		}
 		this.statusContainer.clear();
+		this.clearPendingImagesAndThumbnailsOnly();
 
 		// Reset via session (emits hook and tool session events)
 		await this.session.reset();

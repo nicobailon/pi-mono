@@ -44,6 +44,7 @@
 		"@mariozechner/pi-tui": "^0.24.0",
 		"chalk": "^5.5.0",
 		"cli-highlight": "^2.1.11",
+		"clipboard-image": "^0.1.0",
 		"diff": "^8.0.2",
 		"file-type": "^21.1.1",
 		"glob": "^11.0.3",

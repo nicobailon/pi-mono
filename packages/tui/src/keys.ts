@@ -25,6 +25,7 @@ const CODEPOINTS = {
 	p: 112,
 	t: 116,
 	u: 117,
+	v: 118,
 	w: 119,
 
 	// Special keys
@@ -73,6 +74,9 @@ export const Keys = {
 
 	// Backspace combinations
 	ALT_BACKSPACE: kittySequence(CODEPOINTS.backspace, MODIFIERS.alt),
+
+	// Ctrl+Shift combinations
+	CTRL_SHIFT_V: kittySequence(CODEPOINTS.v, MODIFIERS.ctrl + MODIFIERS.shift),
 } as const;
 
 /**
@@ -203,4 +207,12 @@ export function isShiftTab(data: string): boolean {
  */
 export function isEscape(data: string): boolean {
 	return data === "\x1b" || data === `\x1b[${CODEPOINTS.escape}u`;
+}
+
+/**
+ * Check if input matches Ctrl+Shift+V (Kitty protocol only).
+ * Used for clipboard image paste.
+ */
+export function isCtrlShiftV(data: string): boolean {
+	return data === Keys.CTRL_SHIFT_V;
 }
