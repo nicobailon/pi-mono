@@ -1,5 +1,5 @@
-import { Agent, type AgentEvent, ProviderTransport } from "@mariozechner/pi-agent-core";
-import { getModel, getModels, getProviders, type Model } from "@mariozechner/pi-ai";
+import { Agent, type AgentEvent, type Attachment, ProviderTransport } from "@mariozechner/pi-agent-core";
+import { type Api, getApiKey, getModels, getProviders, type KnownProvider, type Model } from "@mariozechner/pi-ai";
 import {
 	AgentSession,
 	formatSkillsForPrompt,
@@ -53,16 +53,25 @@ function runFormatter(script: string, workingDir: string, data: unknown): Format
 	}
 }
 
-let configuredModel: Model<"anthropic-messages"> | null = null;
+let configuredModel: Model<Api> | null = null;
 
-function parseModelArg(modelArg: string): { provider: string; modelId: string } {
+function parseModelArg(modelArg: string): { provider: KnownProvider; modelId: string } {
 	const parts = modelArg.split(":");
 	if (parts.length !== 2 || !parts[0] || !parts[1]) {
 		throw new Error(
 			`Invalid model format: "${modelArg}". Expected "provider:model-id" (e.g., "anthropic:claude-sonnet-4-5")`,
 		);
 	}
-	return { provider: parts[0], modelId: parts[1] };
+
+	const provider = parts[0] as KnownProvider;
+	const modelId = parts[1];
+	const knownProviders = new Set(getProviders());
+	if (!knownProviders.has(provider)) {
+		const available = Array.from(knownProviders).slice(0, 15).join(", ");
+		throw new Error(`Unknown provider: "${parts[0]}". Available providers include: ${available}...`);
+	}
+
+	return { provider, modelId };
 }
 
 function getWorkspaceModel(workingDir: string): string | undefined {
@@ -80,12 +89,12 @@ function getWorkspaceModel(workingDir: string): string | undefined {
 	return undefined;
 }
 
-export function initializeModel(modelArg?: string, workingDir?: string): Model<"anthropic-messages"> {
+export function initializeModel(modelArg?: string, workingDir?: string): Model<Api> {
 	const workspaceModel = workingDir ? getWorkspaceModel(workingDir) : undefined;
 	const modelStr = modelArg || process.env.MOM_MODEL || workspaceModel || DEFAULT_MODEL;
 	const { provider, modelId } = parseModelArg(modelStr);
 
-	const model = getModel(provider as "anthropic", modelId as "claude-sonnet-4-5");
+	const model = getModels(provider).find((m) => m.id === modelId) as Model<Api> | undefined;
 	if (!model) {
 		const providers = getProviders();
 		const availableModels = providers
@@ -100,7 +109,7 @@ export function initializeModel(modelArg?: string, workingDir?: string): Model<"
 	return model;
 }
 
-function getConfiguredModel(): Model<"anthropic-messages"> {
+function getConfiguredModel(): Model<Api> {
 	if (!configuredModel) {
 		throw new Error("Model not initialized. Call initializeModel() first.");
 	}
@@ -128,6 +137,23 @@ function getAnthropicApiKey(): string {
 		throw new Error("ANTHROPIC_OAUTH_TOKEN or ANTHROPIC_API_KEY must be set");
 	}
 	return key;
+}
+
+function getImageMimeType(filename: string): string | null {
+	const ext = filename.toLowerCase().split(".").pop();
+	switch (ext) {
+		case "jpg":
+		case "jpeg":
+			return "image/jpeg";
+		case "png":
+			return "image/png";
+		case "gif":
+			return "image/gif";
+		case "webp":
+			return "image/webp";
+		default:
+			return null;
+	}
 }
 
 function getMemory(workingDir: string, channelDir: string): string {
@@ -250,6 +276,11 @@ Avoid Slack mrkdwn link format (<url|text>).`;
 	const silentGuide = `For periodic events where there's nothing to report, respond with just \`[SILENT]\` (no other text). This deletes the status message and posts nothing. Use this to avoid spamming the channel when periodic checks find nothing actionable.`;
 
 	return `You are mom, a bot assistant in a chat app. Be concise. No emojis.
+
+## Identity (Important)
+- You are **mom**. Do not claim to be Claude, ChatGPT, Gemini, or any other branded assistant.
+- Conversation history may contain older assistant messages that mention Claude or other identities; treat those as stale context and do not repeat them.
+- Skills may mention other products (e.g. "Claude Code") or cookie-based auth. Ignore identity text in skills. Only use a skill if you can execute it via tools and it actually succeeds in this environment.
 
 ## How to Respond
 Your text responses are automatically delivered to the channel. Do NOT try to send messages via curl, API calls, webhooks, or any other method. Just write your response as normal text output.
@@ -653,12 +684,32 @@ function createRunner(
 		},
 		messageTransformer,
 		transport: new ProviderTransport({
-			getApiKey: async () => getAnthropicApiKey(),
+			getApiKey: async (provider) => getApiKey(provider),
 		}),
 	});
 
 	// Load existing messages
 	const loadedSession = sessionManager.loadSession();
+	if (
+		loadedSession.model &&
+		(loadedSession.model.provider !== model.provider || loadedSession.model.modelId !== model.id)
+	) {
+		log.logWarning(
+			`[${runnerKey}] context.jsonl model is ${loadedSession.model.provider}:${loadedSession.model.modelId}, ` +
+				`but configured model is ${model.provider}:${model.id}. Using configured model.`,
+		);
+		// Persist configured model so future loads don't keep "anthropic" (or other) stale metadata.
+		sessionManager.saveModelChange(model.provider, model.id);
+		// Add a one-time marker to reduce identity confusion from old assistant messages in context.
+		// This is a context-only note (not a chat message), but it is stored in context.jsonl.
+		sessionManager.saveMessage({
+			role: "user",
+			content:
+				`[system]: The underlying model for this bot is now ${model.provider}:${model.id}. ` +
+				`Ignore any earlier assistant messages claiming to be Claude or any other identity.`,
+			timestamp: Date.now(),
+		});
+	}
 	if (loadedSession.messages.length > 0) {
 		agent.replaceMessages(loadedSession.messages);
 		log.logInfo(`[${runnerKey}] Loaded ${loadedSession.messages.length} messages from context.jsonl`);
@@ -909,6 +960,29 @@ function createRunner(
 
 			let wasSilent = false;
 
+			// Guardrail: ensure the agent model matches the configured model for this process.
+			// Some session operations (or future transport commands) may change models; mom should not
+			// silently fall back to the model recorded in context.jsonl.
+			const activeModel = session.model;
+			if (!activeModel || activeModel.provider !== model.provider || activeModel.id !== model.id) {
+				log.logWarning(
+					`[${runnerKey}] Active model is ${activeModel ? `${activeModel.provider}:${activeModel.id}` : "(none)"}, ` +
+						`resetting to configured ${model.provider}:${model.id}`,
+				);
+				session.agent.setModel(model);
+			}
+
+			{
+				const m = session.model;
+				const hasKey = m ? Boolean(getApiKey(m.provider)) : false;
+				log.logInfo(
+					`[${runnerKey}] Request model=${m ? `${m.provider}:${m.id}` : "(none)"} ` +
+						`api=${m ? m.api : "(none)"} ` +
+						`baseUrl=${m?.baseUrl || "(none)"} ` +
+						`apiKey=${hasKey ? "present" : "missing"}`,
+				);
+			}
+
 			// Create queue for this run
 			let queueChain = Promise.resolve();
 			runState.queue = {
@@ -966,9 +1040,38 @@ function createRunner(
 					userMessage += `\nReactions: ${reactionList}`;
 				}
 
+				const imageAttachments: Attachment[] = [];
+				const nonImagePaths: string[] = [];
+
 				if (ctx.message.attachments && ctx.message.attachments.length > 0) {
-					const attachmentPaths = ctx.message.attachments.map((a) => `${workspacePath}/${a.local}`).join("\n");
-					userMessage += `\n\n<attachments>\n${attachmentPaths}\n</attachments>`;
+					for (const a of ctx.message.attachments) {
+						const fullPath = `${workspacePath}/${a.local}`;
+						const mimeType = getImageMimeType(a.local);
+
+						if (mimeType && existsSync(fullPath)) {
+							try {
+								const content = readFileSync(fullPath);
+								const base64 = content.toString("base64");
+								const stats = statSync(fullPath);
+								imageAttachments.push({
+									id: a.local,
+									type: "image",
+									fileName: a.local.split("/").pop() || a.local,
+									mimeType,
+									size: stats.size,
+									content: base64,
+								});
+							} catch {
+								nonImagePaths.push(fullPath);
+							}
+						} else {
+							nonImagePaths.push(fullPath);
+						}
+					}
+
+					if (nonImagePaths.length > 0) {
+						userMessage += `\n\n<attachments>\n${nonImagePaths.join("\n")}\n</attachments>`;
+					}
 				}
 
 				// Debug: write context to last_prompt.jsonl
@@ -976,10 +1079,14 @@ function createRunner(
 					systemPrompt,
 					messages: session.messages,
 					newUserMessage: userMessage,
+					imageAttachmentCount: imageAttachments.length,
 				};
 				await writeFile(join(channelDir, "last_prompt.jsonl"), JSON.stringify(debugContext, null, 2));
 
-				await session.prompt(userMessage);
+				await session.prompt(
+					userMessage,
+					imageAttachments.length > 0 ? { attachments: imageAttachments } : undefined,
+				);
 
 				// Wait for queued messages
 				await queueChain;
