@@ -1211,13 +1211,21 @@ export class AgentSession {
 		}
 
 		const selectedText = this._extractUserMessageText(selectedEntry.message.content);
+		let targetTurnIndex = -1;
+		for (let i = 0; i <= entryIndex && i < entries.length; i++) {
+			const entry = entries[i];
+			if (entry.type === "message" && entry.message.role === "user") {
+				targetTurnIndex++;
+			}
+		}
 
 		// Emit branch event to hooks
 		let hookResult: BranchEventResult | undefined;
 		if (this._hookRunner?.hasHandlers("branch")) {
 			hookResult = (await this._hookRunner.emit({
 				type: "branch",
-				targetTurnIndex: entryIndex,
+				targetTurnIndex,
+				targetEntryIndex: entryIndex,
 				entries,
 			})) as BranchEventResult | undefined;
 		}

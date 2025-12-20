@@ -47,7 +47,7 @@ export class HookInputComponent extends Container {
 
 	handleInput(keyData: string): void {
 		// Enter
-		if (isEnter(keyData) || keyData === "\n") {
+		if (isEnter(keyData)) {
 			this.onSubmitCallback(this.input.getValue());
 			return;
 		}

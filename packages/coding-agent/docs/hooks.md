@@ -155,7 +155,8 @@ Fired BEFORE a branch happens. Can control branch behavior.
 
 ```typescript
 pi.on("branch", async (event, ctx) => {
-  // event.targetTurnIndex: number
+  // event.targetTurnIndex: number - matches turn_start/turn_end turnIndex
+  // event.targetEntryIndex: number - index into event.entries array
   // event.entries: SessionEntry[]
   return { skipConversationRestore: true }; // or undefined
 });

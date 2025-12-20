@@ -261,8 +261,10 @@ export function isLsToolResult(e: ToolResultEvent): e is LsToolResultEvent {
  */
 export interface BranchEvent {
 	type: "branch";
-	/** Index of the turn to branch from */
+	/** Turn index to branch from (matches turn_start/turn_end) */
 	targetTurnIndex: number;
+	/** Entry index into session entries to branch from */
+	targetEntryIndex: number;
 	/** Full session history */
 	entries: SessionEntry[];
 }

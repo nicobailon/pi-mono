@@ -77,7 +77,7 @@ export class HookSelectorComponent extends Container {
 			this.updateList();
 		}
 		// Enter
-		else if (isEnter(keyData) || keyData === "\n") {
+		else if (isEnter(keyData)) {
 			const selected = this.options[this.selectedIndex];
 			if (selected) {
 				this.onSelectCallback(selected);
