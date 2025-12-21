@@ -6,6 +6,8 @@ import { type AgentRunner, getOrCreateRunner, getOrCreateRunnerForTransport, ini
 import { MomSettingsManager, syncLogToContext } from "./context.js";
 import { downloadChannel } from "./download.js";
 import { createEventsWatcher } from "./events.js";
+import { discoverAndLoadHooks, HookRunner } from "./hooks/index.js";
+import type { RunResult } from "./hooks/types.js";
 import * as log from "./log.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
 import { ChannelStore } from "./store.js";
@@ -25,6 +27,40 @@ import { createSlackContext } from "./transport/slack/index.js";
 import type { TransportContext } from "./transport/types.js";
 
 type TransportArg = "slack" | "discord";
+
+async function initHookRunner(workingDir: string, settingsManager: MomSettingsManager): Promise<HookRunner> {
+	const { hooks, errors } = await discoverAndLoadHooks(workingDir, settingsManager.getHookPaths());
+	for (const err of errors) log.logWarning(`Failed to load hook: ${err.path}`, err.error);
+	if (hooks.length > 0) log.logInfo(`Loaded ${hooks.length} hooks: ${hooks.map((h) => h.name).join(", ")}`);
+	return new HookRunner({
+		hooks,
+		workingDir,
+		getSettings: () => settingsManager.getHookSettings(),
+		getHookSettings: <T>(key: string) => settingsManager.getSettingsForHook<T>(key),
+	});
+}
+
+function buildRunResult(
+	stopReason: string,
+	errorMessage: string | undefined,
+	wasSilent: boolean | undefined,
+	startTime: number,
+): RunResult {
+	return {
+		stopReason,
+		errorMessage,
+		wasSilent,
+		durationMs: Date.now() - startTime,
+		usage: {
+			inputTokens: 0,
+			outputTokens: 0,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		toolCalls: [],
+	};
+}
 
 // ============================================================================
 // Config
@@ -179,6 +215,8 @@ async function startSlackBot({ workingDir, sandbox }: { workingDir: string; sand
 	log.logStartup(workingDir, sandbox.type === "host" ? "host" : `docker:${sandbox.container}`);
 	const settingsManager = new MomSettingsManager(workingDir);
 
+	const hookRunner = await initHookRunner(workingDir, settingsManager);
+
 	// ============================================================================
 	// State (per channel)
 	// ============================================================================
@@ -259,8 +297,47 @@ async function startSlackBot({ workingDir, sandbox }: { workingDir: string; sand
 
 			state.running = true;
 			state.stopRequested = false;
+			hookRunner.setRunActive(true);
 
 			log.logInfo(`[${event.channel}] Starting run: ${event.text.substring(0, 50)}`);
+
+			const abortController = new AbortController();
+			const user = slackBot?.getUser(event.user);
+			const channel = slackBot?.getChannel(event.channel);
+
+			const hookContext = {
+				transport: "slack" as const,
+				channelDir,
+				message: {
+					text: event.text,
+					rawText: event.text,
+					messageId: event.ts,
+					timestamp: new Date(parseFloat(event.ts) * 1000).toISOString(),
+					attachments: event.attachments?.map((a) => ({ localPath: a.local })) ?? [],
+				},
+				user: {
+					id: event.user,
+					userName: user?.userName,
+					displayName: user?.displayName,
+					email: user?.email,
+				},
+				channel: {
+					id: event.channel,
+					name: channel?.name,
+				},
+				reply: {
+					primary: async (text: string) => {
+						await slack.postMessage(event.channel, text);
+					},
+					secondary: async (text: string) => {
+						await slack.postMessage(event.channel, text);
+					},
+				},
+				sendFn: async (text: string) => {
+					await slack.postMessage(event.channel, text);
+				},
+				signal: abortController.signal,
+			};
 
 			try {
 				const syncedCount = syncLogToContext(channelDir, { mode: "slack", excludeAfterTs: event.ts });
@@ -280,8 +357,16 @@ async function startSlackBot({ workingDir, sandbox }: { workingDir: string; sand
 
 				await ctx.setTyping(true);
 				await ctx.setWorking(true);
+				const startTime = Date.now();
 				const result = await state.runner.run(ctx);
 				await ctx.setWorking(false);
+
+				if (hookRunner.hasRunHooks()) {
+					await hookRunner.runAfterHooks({
+						...hookContext,
+						result: buildRunResult(result.stopReason, result.errorMessage, result.wasSilent, startTime),
+					});
+				}
 
 				if (result.stopReason === "aborted" && state.stopRequested) {
 					if (state.stopMessageTs) {
@@ -293,9 +378,41 @@ async function startSlackBot({ workingDir, sandbox }: { workingDir: string; sand
 				}
 			} catch (err) {
 				log.logWarning(`[${event.channel}] Run error`, err instanceof Error ? err.message : String(err));
+				if (hookRunner.hasRunHooks()) {
+					await hookRunner.runOnError({
+						...hookContext,
+						error: err instanceof Error ? err : new Error(String(err)),
+					});
+				}
 			} finally {
 				state.running = false;
+				hookRunner.setRunActive(false);
 			}
+		},
+
+		onMessageEvent(data) {
+			if (!hookRunner.hasTransportHooks()) return;
+			const channelDir = join(workingDir, data.channelId);
+			hookRunner.emitTransportEvent("message", {
+				transport: "slack",
+				channelDir,
+				channelId: data.channelId,
+				channelName: data.channelName,
+				sendFn: async (text) => {
+					if (slackBot) await slackBot.postMessage(data.channelId, text);
+				},
+				eventData: {
+					id: data.id,
+					text: data.text,
+					userId: data.userId,
+					userName: data.userName,
+					displayName: data.displayName,
+					isBot: data.isBot,
+					isMention: data.isMention,
+					threadTs: data.threadTs,
+					attachments: data.attachments,
+				},
+			});
 		},
 	};
 
@@ -342,6 +459,8 @@ async function startDiscordBot({ workingDir, sandbox }: { workingDir: string; sa
 
 	log.logStartup(workingDir, sandbox.type === "host" ? "host" : `docker:${sandbox.container}`);
 	const settingsManager = new MomSettingsManager(workingDir);
+
+	const hookRunner = await initHookRunner(workingDir, settingsManager);
 
 	type ActiveRun = { runner: AgentRunner; stopRequested: boolean; stopContext?: TransportContext };
 	const activeRuns = new Map<string, ActiveRun>();
@@ -398,12 +517,57 @@ async function startDiscordBot({ workingDir, sandbox }: { workingDir: string; sa
 			() => ({ addReaction: (channelId, messageId, emoji) => bot.addReaction(channelId, messageId, emoji) }),
 		);
 		activeRuns.set(runnerKey, { runner, stopRequested: false });
+		hookRunner.setRunActive(true);
+
+		const abortController = new AbortController();
+		const hookContext = {
+			transport: "discord" as const,
+			channelDir: ctx.channelDir,
+			message: {
+				text: ctx.message.text,
+				rawText: ctx.message.rawText,
+				messageId: ctx.message.messageId,
+				timestamp: new Date().toISOString(),
+				attachments: ctx.message.attachments?.map((a) => ({ localPath: a.local })) ?? [],
+			},
+			user: {
+				id: ctx.message.userId,
+				userName: ctx.message.userName,
+				displayName: ctx.message.displayName,
+			},
+			channel: {
+				id: ctx.message.channelId,
+				name: ctx.channelName,
+				guildId: ctx.guildId,
+				guildName: ctx.guildName,
+			},
+			reply: {
+				primary: async (text: string) => {
+					await ctx.send("response", text);
+				},
+				secondary: async (text: string) => {
+					await ctx.send("details", text);
+				},
+			},
+			sendFn: async (text: string) => {
+				await ctx.send("response", text);
+			},
+			signal: abortController.signal,
+		};
 
 		try {
 			await ctx.setTyping(true);
 			await ctx.setWorking(true);
+			const startTime = Date.now();
 			const result = await runner.run(ctx);
 			await ctx.setWorking(false);
+
+			if (hookRunner.hasRunHooks()) {
+				await hookRunner.runAfterHooks({
+					...hookContext,
+					result: buildRunResult(result.stopReason, result.errorMessage, result.wasSilent, startTime),
+				});
+			}
 
 			const active = activeRuns.get(runnerKey);
 			if (result.stopReason === "aborted" && active?.stopRequested) {
@@ -423,6 +587,12 @@ async function startDiscordBot({ workingDir, sandbox }: { workingDir: string; sa
 			}
 		} catch (error) {
 			log.logAgentError(logCtx, error instanceof Error ? error.message : String(error));
+			if (hookRunner.hasRunHooks()) {
+				await hookRunner.runOnError({
+					...hookContext,
+					error: error instanceof Error ? error : new Error(String(error)),
+				});
+			}
 			try {
 				await ctx.setWorking(false);
 				await ctx.send(
@@ -437,6 +607,7 @@ async function startDiscordBot({ workingDir, sandbox }: { workingDir: string; sa
 			}
 		} finally {
 			activeRuns.delete(runnerKey);
+			hookRunner.setRunActive(false);
 		}
 	};
 
@@ -473,6 +644,38 @@ async function startDiscordBot({ workingDir, sandbox }: { workingDir: string; sa
 				}
 
 				await handleDiscordContext(ctx);
+			},
+
+			onMessageEvent(data) {
+				if (!hookRunner.hasTransportHooks()) return;
+				const channelDir = join(workingDir, data.channelId);
+				hookRunner.emitTransportEvent("message", {
+					transport: "discord",
+					channelDir,
+					channelId: data.channelId,
+					channelName: data.channelName,
+					guildId: data.guildId,
+					guildName: data.guildName,
+					sendFn: async (text) => {
+						try {
+							const channel = await bot.getClient().channels.fetch(data.channelId);
+							if (channel?.isTextBased() && "send" in channel) {
+								await (channel as { send: (content: string) => Promise<unknown> }).send(text);
+							}
+						} catch {}
+					},
+					eventData: {
+						id: data.id,
+						text: data.text,
+						userId: data.userId,
+						userName: data.userName,
+						displayName: data.displayName,
+						isBot: data.isBot,
+						isMention: data.isMention,
+						replyToMessageId: data.replyToMessageId,
+						attachments: data.attachments,
+					},
+				});
 			},
 		},
 		{ botToken: DISCORD_BOT_TOKEN, workingDir, settingsManager },

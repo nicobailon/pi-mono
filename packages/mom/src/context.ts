@@ -325,6 +325,10 @@ export interface AllowDMsPerTransport {
 	discord?: boolean;
 }
 
+export interface MomHookSettings {
+	transportEventTimeout?: number;
+}
+
 export interface MomSettings {
 	defaultProvider?: string;
 	defaultModel?: string;
@@ -337,6 +341,8 @@ export interface MomSettings {
 	dmAllowlist?: string[];
 	showDetails?: boolean;
 	showToolResults?: boolean;
+	hooks?: string[];
+	hookSettings?: MomHookSettings & Record<string, unknown>;
 }
 
 const DEFAULT_COMPACTION: MomCompactionSettings = {
@@ -521,11 +527,20 @@ export class MomSettingsManager {
 	}
 
 	getHookPaths(): string[] {
-		return []; // Mom doesn't use hooks
+		return this.settings.hooks ?? [];
 	}
 
 	getHookTimeout(): number {
-		return 30000;
+		return this.settings.hookSettings?.transportEventTimeout ?? 5000;
+	}
+
+	getHookSettings(): MomHookSettings & Record<string, unknown> {
+		return this.settings.hookSettings ?? {};
+	}
+
+	getSettingsForHook<T>(hookName: string): T | undefined {
+		const key = hookName.startsWith("hook:") ? hookName : `hook:${hookName}`;
+		return this.settings.hookSettings?.[key] as T | undefined;
 	}
 }
 

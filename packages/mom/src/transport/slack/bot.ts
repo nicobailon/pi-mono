@@ -63,12 +63,28 @@ export interface SlackContext {
 	deleteMessage: () => Promise<void>;
 }
 
+export interface SlackMessageEventData {
+	id: string;
+	text: string;
+	userId: string;
+	userName?: string;
+	displayName?: string;
+	isBot: boolean;
+	isMention: boolean;
+	channelId: string;
+	channelName?: string;
+	threadTs?: string;
+	attachments: Array<{ name: string; localPath?: string }>;
+}
+
 export interface MomHandler {
 	isRunning(channelId: string): boolean;
 
 	handleEvent(event: SlackEvent, slack: SlackBot, isEvent?: boolean): Promise<void>;
 
 	handleStop(channelId: string, slack: SlackBot): Promise<void>;
+
+	onMessageEvent?(data: SlackMessageEventData): void;
 }
 
 type QueuedWork = () => Promise<void>;
@@ -391,6 +407,7 @@ export class SlackBot {
 				channel: string;
 				user?: string;
 				ts: string;
+				thread_ts?: string;
 				channel_type?: string;
 				subtype?: string;
 				bot_id?: string;
@@ -450,6 +467,24 @@ export class SlackBot {
 				} else {
 					this.getQueue(e.channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
 				}
+			}
+
+			if (this.handler.onMessageEvent) {
+				const user = this.users.get(e.user);
+				const channel = this.channels.get(e.channel);
+				this.handler.onMessageEvent({
+					id: e.ts,
+					text: e.text || "",
+					userId: e.user,
+					userName: user?.userName,
+					displayName: user?.displayName,
+					isBot: false,
+					isMention: isBotMention || false,
+					channelId: e.channel,
+					channelName: channel?.name,
+					threadTs: e.thread_ts,
+					attachments: slackEvent.attachments?.map((a) => ({ name: basename(a.local), localPath: a.local })) || [],
+				});
 			}
 		});
 	}

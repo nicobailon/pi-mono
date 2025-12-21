@@ -127,7 +127,7 @@ export interface AgentRunner {
 	run(
 		ctx: TransportContext,
 		pendingMessages?: PendingMessage[],
-	): Promise<{ stopReason: string; errorMessage?: string }>;
+	): Promise<{ stopReason: string; errorMessage?: string; wasSilent?: boolean }>;
 	abort(): void;
 }
 
@@ -397,6 +397,17 @@ When writing programs that create immediate events (email watchers, webhook hand
 
 ### Limits
 Maximum 5 events can be queued. Don't create excessive immediate or periodic events.
+
+## Ambient Mode (Engagement Detection)
+When the ambient hook is enabled, you may receive messages prefixed with **[ENGAGEMENT]**. This means someone posted in the channel shortly after you responded - they might be continuing the conversation or reacting to what you said.
+
+When you see \`[ENGAGEMENT]\`:
+- Read the recent context to understand the conversation flow
+- If you have something valuable to add, respond naturally
+- If there's nothing meaningful to contribute, respond with just \`[SILENT]\` to avoid unnecessary noise
+- Don't force a response - quality over quantity
+
+The engagement window is time-based: after you respond to anything, there's a brief period where channel activity may trigger you again. This creates a more natural conversational flow.
 
 	## Memory
 	Write to MEMORY.md files to persist context across conversations.
@@ -1011,7 +1022,7 @@ function createRunner(
 				},
 			};
 
-			let result: { stopReason: string; errorMessage?: string } | null = null;
+			let result: { stopReason: string; errorMessage?: string; wasSilent?: boolean } | null = null;
 
 			try {
 				// Log context info
@@ -1190,7 +1201,7 @@ function createRunner(
 					}
 				}
 
-				result = { stopReason: runState.stopReason, errorMessage: runState.errorMessage };
+				result = { stopReason: runState.stopReason, errorMessage: runState.errorMessage, wasSilent };
 				return result;
 			} finally {
 				// Remove stop controls after completion (best-effort)

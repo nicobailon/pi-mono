@@ -69,11 +69,28 @@ class ChannelQueue {
 	}
 }
 
+export interface DiscordMessageEventData {
+	id: string;
+	text: string;
+	userId: string;
+	userName?: string;
+	displayName?: string;
+	isBot: boolean;
+	isMention: boolean;
+	channelId: string;
+	guildId?: string;
+	channelName?: string;
+	guildName?: string;
+	replyToMessageId?: string;
+	attachments: Array<{ name: string; localPath?: string }>;
+}
+
 export interface MomDiscordHandler {
 	onMention(ctx: TransportContext): Promise<void>;
 	onDirectMessage(ctx: TransportContext): Promise<void>;
 	onStopButton?(channelId: string): Promise<void>;
 	onEvent?(ctx: TransportContext, isEvent: boolean): Promise<void>;
+	onMessageEvent?(data: DiscordMessageEventData): void;
 }
 
 export interface MomDiscordConfig {
@@ -181,6 +198,26 @@ export class MomDiscordBot {
 				},
 				message.guild?.id,
 			);
+
+			if (this.handler.onMessageEvent) {
+				const channelName =
+					!isDM && "name" in message.channel ? String((message.channel as { name?: string }).name) : undefined;
+				this.handler.onMessageEvent({
+					id: message.id,
+					text: message.content,
+					userId: message.author.id,
+					userName,
+					displayName,
+					isBot: false,
+					isMention: isMentioned,
+					channelId: message.channel.id,
+					guildId: message.guild?.id,
+					channelName,
+					guildName: message.guild?.name,
+					replyToMessageId: message.reference?.messageId ?? undefined,
+					attachments: attachments.map((a) => ({ name: basename(a.local), localPath: a.local })),
+				});
+			}
 
 			if (isDM) {
 				// Check DM authorization (silent reject if not allowed)
