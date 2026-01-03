@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
 import { getAgentDir } from "../../config.js";
+import { createEventBus, type EventBus } from "../event-bus.js";
 import type { HookMessage } from "../messages.js";
 import type { SessionManager } from "../session-manager.js";
 import { execCommand } from "./runner.js";
@@ -153,6 +154,7 @@ function resolveHookPath(hookPath: string, cwd: string): string {
 function createHookAPI(
 	handlers: Map<string, HandlerFn[]>,
 	cwd: string,
+	eventBus: EventBus,
 ): {
 	api: HookAPI;
 	messageRenderers: Map<string, HookMessageRenderer>;
@@ -195,6 +197,7 @@ function createHookAPI(
 		exec(command: string, args: string[], options?: ExecOptions) {
 			return execCommand(command, args, options?.cwd ?? cwd, options);
 		},
+		events: eventBus,
 	} as HookAPI;
 
 	return {
@@ -213,7 +216,11 @@ function createHookAPI(
 /**
  * Load a single hook module using jiti.
  */
-async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHook | null; error: string | null }> {
+async function loadHook(
+	hookPath: string,
+	cwd: string,
+	eventBus: EventBus,
+): Promise<{ hook: LoadedHook | null; error: string | null }> {
 	const resolvedPath = resolveHookPath(hookPath, cwd);
 
 	try {
@@ -237,6 +244,7 @@ async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHo
 		const { api, messageRenderers, commands, setSendMessageHandler, setAppendEntryHandler } = createHookAPI(
 			handlers,
 			cwd,
+			eventBus,
 		);
 
 		// Call factory to register handlers
@@ -264,13 +272,15 @@ async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHo
  * Load all hooks from configuration.
  * @param paths - Array of hook file paths
  * @param cwd - Current working directory for resolving relative paths
+ * @param eventBus - Optional shared event bus (creates isolated bus if not provided)
  */
-export async function loadHooks(paths: string[], cwd: string): Promise<LoadHooksResult> {
+export async function loadHooks(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadHooksResult> {
 	const hooks: LoadedHook[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
+	const resolvedEventBus = eventBus ?? createEventBus();
 
 	for (const hookPath of paths) {
-		const { hook, error } = await loadHook(hookPath, cwd);
+		const { hook, error } = await loadHook(hookPath, cwd, resolvedEventBus);
 
 		if (error) {
 			errors.push({ path: hookPath, error });
@@ -310,11 +320,17 @@ function discoverHooksInDir(dir: string): string[] {
  * 2. cwd/.pi/hooks/*.ts (project-local)
  *
  * Plus any explicitly configured paths from settings.
+ *
+ * @param configuredPaths - Explicitly configured hook paths
+ * @param cwd - Current working directory
+ * @param agentDir - Agent configuration directory
+ * @param eventBus - Optional shared event bus (creates isolated bus if not provided)
  */
 export async function discoverAndLoadHooks(
 	configuredPaths: string[],
 	cwd: string,
 	agentDir: string = getAgentDir(),
+	eventBus?: EventBus,
 ): Promise<LoadHooksResult> {
 	const allPaths: string[] = [];
 	const seen = new Set<string>();
@@ -341,5 +357,5 @@ export async function discoverAndLoadHooks(
 	// 3. Explicitly configured paths (can override/add)
 	addPaths(configuredPaths.map((p) => resolveHookPath(p, cwd)));
 
-	return loadHooks(allPaths, cwd);
+	return loadHooks(allPaths, cwd, eventBus);
 }

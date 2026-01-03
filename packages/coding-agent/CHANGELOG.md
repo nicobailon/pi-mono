@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Event bus (`pi.events`) for tool/hook communication: shared pub/sub between custom tools and hooks
+
 ## [0.33.0] - 2026-01-04
 
 ### Breaking Changes

@@ -752,6 +752,28 @@ const result = await pi.exec("git", ["status"], {
 // result.stdout, result.stderr, result.code, result.killed
 ```
 
+### pi.events
+
+Shared event bus for communication between hooks and custom tools. Tools can emit events, hooks can listen and wake the agent.
+
+```typescript
+// Listen for events and wake agent when received
+pi.events.on("task:complete", (data) => {
+  pi.sendMessage(
+    { customType: "task-notify", content: `Task done: ${data}`, display: true },
+    { triggerTurn: true }  // Required to wake the agent
+  );
+});
+
+// Unsubscribe when needed
+const unsubscribe = pi.events.on("my:channel", handler);
+unsubscribe();
+```
+
+Events are session-scoped (cleared when session ends). Channel names are arbitrary strings - use namespaced names like `"toolname:event"` to avoid collisions.
+
+**Important:** Use `{ triggerTurn: true }` when you want the agent to respond to the event. Without it, the message displays but the agent stays idle.
+
 ## Examples
 
 ### Permission Gate
