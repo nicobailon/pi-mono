@@ -41,16 +41,22 @@ export type { AgentToolResult, AgentToolUpdateCallback };
 // UI Context
 // ============================================================================
 
+/** Options for UI dialogs that support cancellation. */
+export interface UIDialogOptions {
+	/** AbortSignal to cancel/dismiss the dialog. When aborted, the dialog closes and returns the default value. */
+	signal?: AbortSignal;
+}
+
 /**
  * UI context for extensions to request interactive UI.
  * Each mode (interactive, RPC, print) provides its own implementation.
  */
 export interface ExtensionUIContext {
-	/** Show a selector and return the user's choice. */
-	select(title: string, options: string[]): Promise<string | undefined>;
+	/** Show a selector and return the user's choice. Returns undefined if cancelled or aborted. */
+	select(title: string, options: string[], options_?: UIDialogOptions): Promise<string | undefined>;
 
-	/** Show a confirmation dialog. */
-	confirm(title: string, message: string): Promise<boolean>;
+	/** Show a confirmation dialog. Returns false if cancelled or aborted. */
+	confirm(title: string, message: string, options?: UIDialogOptions): Promise<boolean>;
 
 	/** Show a text input dialog. */
 	input(title: string, placeholder?: string): Promise<string | undefined>;

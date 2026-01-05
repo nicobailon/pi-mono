@@ -18,6 +18,7 @@ import type { ExtensionUIContext } from "../../core/extensions/index.js";
 import { theme } from "../interactive/theme/theme.js";
 import type {
 	RpcCommand,
+	RpcExtensionUICancel,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcResponse,
@@ -27,6 +28,7 @@ import type {
 // Re-export types for consumers
 export type {
 	RpcCommand,
+	RpcExtensionUICancel,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcResponse,
@@ -38,7 +40,7 @@ export type {
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
 export async function runRpcMode(session: AgentSession): Promise<never> {
-	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
+	const output = (obj: RpcResponse | RpcExtensionUIRequest | RpcExtensionUICancel | object) => {
 		console.log(JSON.stringify(obj));
 	};
 
@@ -67,11 +69,34 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 	 * Create an extension UI context that uses the RPC protocol.
 	 */
 	const createExtensionUIContext = (): ExtensionUIContext => ({
-		async select(title: string, options: string[]): Promise<string | undefined> {
+		async select(title: string, options: string[], opts?: { signal?: AbortSignal }): Promise<string | undefined> {
 			const id = crypto.randomUUID();
+			const signal = opts?.signal;
+
+			if (signal?.aborted) {
+				return undefined;
+			}
+
 			return new Promise((resolve, reject) => {
+				let resolved = false;
+				const cleanup = () => {
+					signal?.removeEventListener("abort", onAbort);
+					pendingExtensionRequests.delete(id);
+				};
+				const onAbort = () => {
+					if (resolved) return;
+					resolved = true;
+					cleanup();
+					output({ type: "extension_ui_cancel", id } as RpcExtensionUICancel);
+					resolve(undefined);
+				};
+				signal?.addEventListener("abort", onAbort, { once: true });
+
 				pendingExtensionRequests.set(id, {
 					resolve: (response: RpcExtensionUIResponse) => {
+						if (resolved) return;
+						resolved = true;
+						cleanup();
 						if ("cancelled" in response && response.cancelled) {
 							resolve(undefined);
 						} else if ("value" in response) {
@@ -80,17 +105,45 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 							resolve(undefined);
 						}
 					},
-					reject,
+					reject: (error: Error) => {
+						if (resolved) return;
+						resolved = true;
+						cleanup();
+						reject(error);
+					},
 				});
 				output({ type: "extension_ui_request", id, method: "select", title, options } as RpcExtensionUIRequest);
 			});
 		},
 
-		async confirm(title: string, message: string): Promise<boolean> {
+		async confirm(title: string, message: string, opts?: { signal?: AbortSignal }): Promise<boolean> {
 			const id = crypto.randomUUID();
+			const signal = opts?.signal;
+
+			if (signal?.aborted) {
+				return false;
+			}
+
 			return new Promise((resolve, reject) => {
+				let resolved = false;
+				const cleanup = () => {
+					signal?.removeEventListener("abort", onAbort);
+					pendingExtensionRequests.delete(id);
+				};
+				const onAbort = () => {
+					if (resolved) return;
+					resolved = true;
+					cleanup();
+					output({ type: "extension_ui_cancel", id } as RpcExtensionUICancel);
+					resolve(false);
+				};
+				signal?.addEventListener("abort", onAbort, { once: true });
+
 				pendingExtensionRequests.set(id, {
 					resolve: (response: RpcExtensionUIResponse) => {
+						if (resolved) return;
+						resolved = true;
+						cleanup();
 						if ("cancelled" in response && response.cancelled) {
 							resolve(false);
 						} else if ("confirmed" in response) {
@@ -99,7 +152,12 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 							resolve(false);
 						}
 					},
-					reject,
+					reject: (error: Error) => {
+						if (resolved) return;
+						resolved = true;
+						cleanup();
+						reject(error);
+					},
 				});
 				output({ type: "extension_ui_request", id, method: "confirm", title, message } as RpcExtensionUIRequest);
 			});

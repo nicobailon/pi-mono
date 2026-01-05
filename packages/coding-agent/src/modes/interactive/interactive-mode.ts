@@ -642,8 +642,8 @@ export class InteractiveMode {
 	 */
 	private createExtensionUIContext(): ExtensionUIContext {
 		return {
-			select: (title, options) => this.showExtensionSelector(title, options),
-			confirm: (title, message) => this.showExtensionConfirm(title, message),
+			select: (title, options, opts) => this.showExtensionSelector(title, options, opts?.signal),
+			confirm: (title, message, opts) => this.showExtensionConfirm(title, message, opts?.signal),
 			input: (title, placeholder) => this.showExtensionInput(title, placeholder),
 			notify: (message, type) => this.showExtensionNotify(message, type),
 			setStatus: (key, text) => this.setExtensionStatus(key, text),
@@ -662,16 +662,40 @@ export class InteractiveMode {
 	/**
 	 * Show a selector for extensions.
 	 */
-	private showExtensionSelector(title: string, options: string[]): Promise<string | undefined> {
+	private showExtensionSelector(title: string, options: string[], signal?: AbortSignal): Promise<string | undefined> {
 		return new Promise((resolve) => {
+			if (signal?.aborted) {
+				resolve(undefined);
+				return;
+			}
+
+			let resolved = false;
+			const cleanup = () => {
+				signal?.removeEventListener("abort", onAbort);
+			};
+			const onAbort = () => {
+				if (resolved) return;
+				resolved = true;
+				cleanup();
+				this.hideExtensionSelector();
+				resolve(undefined);
+			};
+			signal?.addEventListener("abort", onAbort, { once: true });
+
 			this.extensionSelector = new ExtensionSelectorComponent(
 				title,
 				options,
 				(option) => {
+					if (resolved) return;
+					resolved = true;
+					cleanup();
 					this.hideExtensionSelector();
 					resolve(option);
 				},
 				() => {
+					if (resolved) return;
+					resolved = true;
+					cleanup();
 					this.hideExtensionSelector();
 					resolve(undefined);
 				},
@@ -698,8 +722,8 @@ export class InteractiveMode {
 	/**
 	 * Show a confirmation dialog for extensions.
 	 */
-	private async showExtensionConfirm(title: string, message: string): Promise<boolean> {
-		const result = await this.showExtensionSelector(`${title}\n${message}`, ["Yes", "No"]);
+	private async showExtensionConfirm(title: string, message: string, signal?: AbortSignal): Promise<boolean> {
+		const result = await this.showExtensionSelector(`${title}\n${message}`, ["Yes", "No"], signal);
 		return result === "Yes";
 	}
 
