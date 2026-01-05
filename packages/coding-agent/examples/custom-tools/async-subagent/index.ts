@@ -358,6 +358,8 @@ const Params = Type.Object({
 	cwd: Type.Optional(Type.String()),
 });
 
+const STALE_THRESHOLD_MS = 60 * 60 * 1000;
+
 const factory: CustomToolFactory = (pi) => {
 	fs.mkdirSync(RESULTS_DIR, { recursive: true });
 
@@ -375,9 +377,21 @@ const factory: CustomToolFactory = (pi) => {
 	const watcher = fs.watch(RESULTS_DIR, (ev, file) => {
 		if (ev === "rename" && file?.toString().endsWith(".json")) setTimeout(() => handleResult(file.toString()), 50);
 	});
+
 	fs.readdirSync(RESULTS_DIR)
 		.filter((f) => f.endsWith(".json"))
 		.forEach(handleResult);
+
+	const now = Date.now();
+	for (const file of fs.readdirSync(RESULTS_DIR).filter((f) => f.endsWith(".json"))) {
+		try {
+			const filePath = path.join(RESULTS_DIR, file);
+			const stat = fs.statSync(filePath);
+			if (now - stat.mtimeMs > STALE_THRESHOLD_MS) {
+				fs.unlinkSync(filePath);
+			}
+		} catch {}
+	}
 
 	const tool: CustomTool<typeof Params, Details> = {
 		name: "async_subagent",
