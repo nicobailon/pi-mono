@@ -4,6 +4,13 @@
 
 ### New Features
 
+- **User-initiated tool execution**: Extensions can now execute tools directly from command and shortcut handlers via `ctx.executeTool(toolName, args)`. The tool runs through pi's normal pipeline (fires UI events, shows in interface) but does NOT add to the conversation history sent to the LLM. Useful for overlays and UI-driven workflows where you have the arguments ready and want immediate, reliable execution. See [docs/extensions.md#ctxexecutetooltoolname-args](docs/extensions.md#ctxexecutetooltoolname-args).
+
+### Added
+
+- Added `ctx.executeTool(toolName, args)` to `ExtensionCommandContext` for executing tools directly from commands and shortcuts
+- Shortcut handlers now receive `ExtensionCommandContext` (previously `ExtensionContext`), giving them access to session control methods including `executeTool`
+
 ### Fixed
 
 - Fixed git package parsing fallback for unknown hosts so enterprise git sources like `git:github.tools.sap/org/repo` are treated as git packages instead of local paths

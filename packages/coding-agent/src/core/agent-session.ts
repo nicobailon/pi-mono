@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type {
@@ -24,7 +25,13 @@ import type {
 	ThinkingLevel,
 } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@mariozechner/pi-ai";
-import { isContextOverflow, modelsAreEqual, resetApiProviders, supportsXhigh } from "@mariozechner/pi-ai";
+import {
+	isContextOverflow,
+	modelsAreEqual,
+	resetApiProviders,
+	supportsXhigh,
+	validateToolArguments,
+} from "@mariozechner/pi-ai";
 import { getDocsPath } from "../config.js";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
@@ -236,6 +243,8 @@ export class AgentSession {
 	// Bash execution state
 	private _bashAbortController: AbortController | undefined = undefined;
 	private _pendingBashMessages: BashExecutionMessage[] = [];
+
+	private _toolExecutionAbortController: AbortController | undefined = undefined;
 
 	// Extension system
 	private _extensionRunner: ExtensionRunner | undefined = undefined;
@@ -1029,6 +1038,67 @@ export class AgentSession {
 	}
 
 	/**
+	 * Execute an active tool directly, without an LLM turn.
+	 * Fires UI events (tool shows in interface) but does NOT add to conversation history.
+	 * Use this for user-initiated tool execution from commands/shortcuts/overlays.
+	 */
+	async executeTool(
+		toolName: string,
+		args: Record<string, unknown>,
+	): Promise<{ content: (TextContent | ImageContent)[]; details?: unknown; isError: boolean }> {
+		if (this.isStreaming) {
+			throw new Error("Cannot execute tools while the agent is streaming");
+		}
+		if (this.isCompacting) {
+			throw new Error("Cannot execute tools while compacting");
+		}
+		if (this._toolExecutionAbortController) {
+			throw new Error("A tool execution is already in progress");
+		}
+
+		const tool = this.agent.state.tools.find((t) => t.name === toolName);
+		if (!tool) {
+			const active = this.agent.state.tools.map((t) => t.name).sort();
+			throw new Error(`Tool is not active: ${toolName}${active.length ? ` (active: ${active.join(", ")})` : ""}`);
+		}
+
+		const safeArgs = JSON.parse(JSON.stringify(args)) as Record<string, unknown>;
+		const toolCallId = randomUUID();
+
+		this._toolExecutionAbortController = new AbortController();
+		const signal = this._toolExecutionAbortController.signal;
+
+		this.agent.state.pendingToolCalls = new Set([...this.agent.state.pendingToolCalls, toolCallId]);
+		this._emit({ type: "tool_execution_start", toolCallId, toolName, args: safeArgs });
+
+		let result: { content: (TextContent | ImageContent)[]; details?: unknown };
+		let isError = false;
+
+		try {
+			const toolCall = { type: "toolCall" as const, id: toolCallId, name: toolName, arguments: safeArgs };
+			const validatedArgs = validateToolArguments(tool, toolCall);
+			result = await tool.execute(toolCallId, validatedArgs, signal, (partialResult) => {
+				this._emit({ type: "tool_execution_update", toolCallId, toolName, args: safeArgs, partialResult });
+			});
+		} catch (err) {
+			isError = true;
+			result = { content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }] };
+		} finally {
+			this._toolExecutionAbortController = undefined;
+			const s = new Set(this.agent.state.pendingToolCalls);
+			s.delete(toolCallId);
+			this.agent.state.pendingToolCalls = s;
+		}
+
+		this._emit({ type: "tool_execution_end", toolCallId, toolName, result, isError });
+
+		// Persist as custom entry for audit trail (not sent to LLM)
+		this.sessionManager.appendCustomEntry("tool_execution", { toolName, args: safeArgs, result, isError });
+
+		return { content: result.content, details: result.details, isError };
+	}
+
+	/**
 	 * Clear all queued messages and return them.
 	 * Useful for restoring to editor when user aborts.
 	 * @returns Object with steering and followUp arrays
@@ -1066,6 +1136,7 @@ export class AgentSession {
 	 */
 	async abort(): Promise<void> {
 		this.abortRetry();
+		this._toolExecutionAbortController?.abort();
 		this.agent.abort();
 		await this.agent.waitForIdle();
 	}
