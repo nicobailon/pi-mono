@@ -2813,15 +2813,9 @@ export class InteractiveMode {
 		const text = (this.editor.getExpandedText?.() ?? this.editor.getText()).trim();
 		if (!text) return;
 
-		// Queue input during compaction (extension commands execute immediately)
+		// Alt+Enter during compaction — queue everything (including extension commands).
 		if (this.session.isCompacting) {
-			if (this.isExtensionCommand(text)) {
-				this.editor.addToHistory?.(text);
-				this.editor.setText("");
-				await this.session.prompt(text);
-			} else {
-				this.queueCompactionMessage(text, "followUp");
-			}
+			this.queueCompactionMessage(text, "followUp");
 			return;
 		}
 
@@ -3145,10 +3139,15 @@ export class InteractiveMode {
 		};
 
 		try {
+			// Wait for idle — Enter-executed extension commands may still be streaming.
+			await this.session.agent.waitForIdle();
+
 			if (options?.willRetry) {
-				// When retry is pending, queue messages for the retry turn
+				// Retry is pending. Regular messages go via steer/followUp.
+				// Extension commands need prompt() — steer/followUp can't handle them.
 				for (const message of queuedMessages) {
 					if (this.isExtensionCommand(message.text)) {
+						await this.session.agent.waitForIdle();
 						await this.session.prompt(message.text);
 					} else if (message.mode === "followUp") {
 						await this.session.followUp(message.text);
@@ -3160,42 +3159,40 @@ export class InteractiveMode {
 				return;
 			}
 
-			// Find first non-extension-command message to use as prompt
-			const firstPromptIndex = queuedMessages.findIndex((message) => !this.isExtensionCommand(message.text));
-			if (firstPromptIndex === -1) {
-				// All extension commands - execute them all
-				for (const message of queuedMessages) {
-					await this.session.prompt(message.text);
-				}
-				return;
-			}
+			// No retry. Extension commands: waitForIdle + awaited prompt().
+			// Regular messages: batched (first as fire-and-forget prompt, rest as steer/followUp).
+			let i = 0;
+			while (i < queuedMessages.length) {
+				const message = queuedMessages[i];
 
-			// Execute any extension commands before the first prompt
-			const preCommands = queuedMessages.slice(0, firstPromptIndex);
-			const firstPrompt = queuedMessages[firstPromptIndex];
-			const rest = queuedMessages.slice(firstPromptIndex + 1);
-
-			for (const message of preCommands) {
-				await this.session.prompt(message.text);
-			}
-
-			// Send first prompt (starts streaming)
-			const promptPromise = this.session.prompt(firstPrompt.text).catch((error) => {
-				restoreQueue(error);
-			});
-
-			// Queue remaining messages
-			for (const message of rest) {
 				if (this.isExtensionCommand(message.text)) {
+					await this.session.agent.waitForIdle();
 					await this.session.prompt(message.text);
-				} else if (message.mode === "followUp") {
-					await this.session.followUp(message.text);
-				} else {
-					await this.session.steer(message.text);
+					i++;
+					continue;
 				}
+
+				// Regular message — start a new agent turn (fire-and-forget).
+				const promptPromise = this.session.prompt(message.text).catch((error) => {
+					restoreQueue(error);
+				});
+				i++;
+
+				// Queue subsequent regular messages into this turn.
+				while (i < queuedMessages.length && !this.isExtensionCommand(queuedMessages[i].text)) {
+					const next = queuedMessages[i];
+					if (next.mode === "followUp") {
+						await this.session.followUp(next.text);
+					} else {
+						await this.session.steer(next.text);
+					}
+					i++;
+				}
+
+				void promptPromise;
 			}
+
 			this.updatePendingMessagesDisplay();
-			void promptPromise;
 		} catch (error) {
 			restoreQueue(error);
 		}

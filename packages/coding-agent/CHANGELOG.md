@@ -9,6 +9,8 @@
 - Fixed RPC `get_session_stats` to expose `contextUsage`, so headless clients can read actual current context-window usage instead of deriving it from token totals ([#2550](https://github.com/badlogic/pi-mono/issues/2550))
 - Fixed `pi update` for git packages to fetch only the tracked target branch with `--no-tags`, reducing unrelated branch and tag noise while preserving force-push-safe updates ([#2548](https://github.com/badlogic/pi-mono/issues/2548))
 - Fixed print and JSON modes to emit `session_shutdown` before exit, so extensions can release long-lived resources and non-interactive runs terminate cleanly ([#2576](https://github.com/badlogic/pi-mono/issues/2576))
+- Fixed compaction queue flush racing with extension commands that stream during compaction, causing "Agent is already processing" errors and stranded queued messages
+- Fixed Alt+Enter during compaction to queue extension commands (like `/chain-prompts`) for after compaction instead of executing them immediately, matching the "queue for later" intent
 
 ## [0.62.0] - 2026-03-23
 
